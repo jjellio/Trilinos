@@ -61,6 +61,14 @@
 #include "Kokkos_Blas1_MV.hpp"
 #include "Kokkos_Random.hpp"
 
+#ifdef HAVE_TPETRA_TIMERS
+  #include <Teuchos_Time.hpp>
+  #include <Teuchos_TimeMonitor.hpp>
+  #include <string>
+  #include <sstream>
+  #include <iomanip>
+#endif
+
 #ifdef HAVE_TPETRA_INST_FLOAT128
 namespace Kokkos {
   // FIXME (mfh 04 Sep 2015) Just a stub for now!
@@ -1673,6 +1681,7 @@ namespace Tpetra {
         const dot_type* const lclSum = lclDots.ptr_on_device ();
         dot_type* const gblSum = dotsOut.ptr_on_device ();
         const int nv = static_cast<int> (numVecs);
+
         reduceAll<int, dot_type> (*comm, REDUCE_SUM, nv, lclSum, gblSum);
       }
     }
@@ -1755,12 +1764,97 @@ namespace Tpetra {
       auto thisView = this->template getLocalView<cur_memory_space> ();
       auto A_view = A.template getLocalView<cur_memory_space> ();
 
+      // ------------------------------------------------------------------  //
+      //                 TpetraTimers                                        //
+      // ------------------------------------------------------------------  //
+      #ifdef HAVE_TPETRA_TIMERS
+      {
+        using Teuchos::Time;
+        using Teuchos::TimeMonitor;
+        // get the correct timer
+        using std::string;
+        using std::stringstream;
+        using std::setw;
+        using std::setfill;
+
+        stringstream ss;
+        ss << lclNumRows << "x" << setw(3) << setfill('0') << numVecs;
+
+        const string timerName = string(tfecfFuncName) + "comp::" + ss.str();
+
+        Teuchos::RCP<Teuchos::Time> timer =
+          Teuchos::TimeMonitor::lookupCounter (timerName);
+        if (timer.is_null ()) {
+          timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+        }
+        TEUCHOS_TEST_FOR_EXCEPTION(
+          timer.is_null (), std::logic_error,
+          "Tpetra::dot "
+          "Failed to look up timer \"" << timerName << "\".  "
+          "Please report this bug to the Belos developers.");
+
+        // This starts the timer.  It will be stopped on scope exit.
+        Teuchos::TimeMonitor timeMon (*timer);
+      #endif // HAVE_TPETRA_TIMERS
+
       lclDotImpl<RV, XMV> (dotsOut, thisView, A_view, lclNumRows, numVecs,
                            this->whichVectors_, A.whichVectors_,
                            this->isConstantStride (), A.isConstantStride ());
+
+      // ------------------------------------------------------------------  //
+      //                 TpetraTimers                                        //
+      // ------------------------------------------------------------------  //
+      #ifdef HAVE_TPETRA_TIMERS
+      // end scope of the computation timer
+      }
+      #endif // HAVE_TPETRA_TIMERS
+
       auto dotsOutHost = Kokkos::create_mirror_view (dotsOut);
       Kokkos::deep_copy (dotsOutHost, dotsOut);
+
+      // ------------------------------------------------------------------  //
+      //                 TpetraTimers                                        //
+      // ------------------------------------------------------------------  //
+      #ifdef HAVE_TPETRA_TIMERS
+      {
+        using Teuchos::Time;
+        using Teuchos::TimeMonitor;
+        // get the correct timer
+        using std::string;
+        using std::stringstream;
+        using std::setw;
+        using std::setfill;
+
+        stringstream ss;
+        ss << lclNumRows << "x" << setw(3) << setfill('0') << numVecs;
+
+        const string timerName = string(tfecfFuncName) + "comm::" + ss.str();
+
+        Teuchos::RCP<Teuchos::Time> timer =
+          Teuchos::TimeMonitor::lookupCounter (timerName);
+        if (timer.is_null ()) {
+          timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+        }
+        TEUCHOS_TEST_FOR_EXCEPTION(
+          timer.is_null (), std::logic_error,
+          "Tpetra::dot "
+          "Failed to look up timer \"" << timerName << "\".  "
+          "Please report this bug to the Belos developers.");
+
+        // This starts the timer.  It will be stopped on scope exit.
+        Teuchos::TimeMonitor timeMon (*timer);
+      #endif // HAVE_TPETRA_TIMERS
+
       gblDotImpl (dotsOutHost, comm, this->isDistributed ());
+
+      // ------------------------------------------------------------------  //
+      //                 TpetraTimers                                        //
+      // ------------------------------------------------------------------  //
+      #ifdef HAVE_TPETRA_TIMERS
+      // end scope of the computation timer
+      }
+      #endif // HAVE_TPETRA_TIMERS
+
       Kokkos::deep_copy (dotsOut, dotsOutHost);
     }
     else {
@@ -1776,10 +1870,91 @@ namespace Tpetra {
       auto thisView = this->template getLocalView<cur_memory_space> ();
       auto A_view = A.template getLocalView<cur_memory_space> ();
 
+      // ------------------------------------------------------------------  //
+      //                 TpetraTimers                                        //
+      // ------------------------------------------------------------------  //
+      #ifdef HAVE_TPETRA_TIMERS
+      {
+        using Teuchos::Time;
+        using Teuchos::TimeMonitor;
+        // get the correct timer
+        using std::string;
+        using std::stringstream;
+        using std::setw;
+        using std::setfill;
+
+        stringstream ss;
+        ss << lclNumRows << "x" << setw(3) << setfill('0') << numVecs;
+
+        const string timerName = string(tfecfFuncName) + "comp::" + ss.str();
+
+        Teuchos::RCP<Teuchos::Time> timer =
+          Teuchos::TimeMonitor::lookupCounter (timerName);
+        if (timer.is_null ()) {
+          timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+        }
+        TEUCHOS_TEST_FOR_EXCEPTION(
+          timer.is_null (), std::logic_error,
+          "Tpetra::dot "
+          "Failed to look up timer \"" << timerName << "\".  "
+          "Please report this bug to the Belos developers.");
+
+        // This starts the timer.  It will be stopped on scope exit.
+        Teuchos::TimeMonitor timeMon (*timer);
+      #endif // HAVE_TPETRA_TIMERS
+
       lclDotImpl<RV, XMV> (dotsOut, thisView, A_view, lclNumRows, numVecs,
                            this->whichVectors_, A.whichVectors_,
                            this->isConstantStride (), A.isConstantStride ());
+
+      // ------------------------------------------------------------------  //
+      //                 TpetraTimers                                        //
+      // ------------------------------------------------------------------  //
+      #ifdef HAVE_TPETRA_TIMERS
+      // end scope of the computation timer
+      }
+      #endif // HAVE_TPETRA_TIMERS
+
+      #ifdef HAVE_TPETRA_TIMERS
+      {
+        using Teuchos::Time;
+        using Teuchos::TimeMonitor;
+        // get the correct timer
+        using std::string;
+        using std::stringstream;
+        using std::setw;
+        using std::setfill;
+
+        stringstream ss;
+        ss << lclNumRows << "x" << setw(3) << setfill('0') << numVecs;
+
+        const string timerName = string(tfecfFuncName) + "comm::" + ss.str();
+
+        Teuchos::RCP<Teuchos::Time> timer =
+          Teuchos::TimeMonitor::lookupCounter (timerName);
+        if (timer.is_null ()) {
+          timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+        }
+        TEUCHOS_TEST_FOR_EXCEPTION(
+          timer.is_null (), std::logic_error,
+          "Tpetra::dot "
+          "Failed to look up timer \"" << timerName << "\".  "
+          "Please report this bug to the Belos developers.");
+
+        // This starts the timer.  It will be stopped on scope exit.
+        Teuchos::TimeMonitor timeMon (*timer);
+      #endif // HAVE_TPETRA_TIMERS
+
       gblDotImpl (dotsOut, comm, this->isDistributed ());
+
+      // ------------------------------------------------------------------  //
+      //                 TpetraTimers                                        //
+      // ------------------------------------------------------------------  //
+      #ifdef HAVE_TPETRA_TIMERS
+      // end scope of the computation timer
+      }
+      #endif // HAVE_TPETRA_TIMERS
+
     }
   }
 

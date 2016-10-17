@@ -42,6 +42,8 @@
 #ifndef TPETRA_MULTIVECTOR_DECL_HPP
 #define TPETRA_MULTIVECTOR_DECL_HPP
 
+#define HAVE_TPETRA_TIMERS
+
 /// \file Tpetra_MultiVector_decl.hpp
 /// \brief Declaration of the Tpetra::MultiVector class
 ///
