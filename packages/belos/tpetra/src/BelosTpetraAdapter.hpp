@@ -128,6 +128,23 @@ namespace Belos {
     //! Create and return a deep copy of X.
     static Teuchos::RCP<MV> CloneCopy (const MV& X)
     {
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::CloneCopy::MV");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::CloneCopy::MV: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       // Make a deep copy of X.  The one-argument copy constructor
       // does a shallow copy by default; the second argument tells it
       // to do a deep copy.
@@ -170,6 +187,23 @@ namespace Belos {
         "columns " << inNumVecs << " of the input multivector mv.");
 #endif // HAVE_TPETRA_DEBUG
 
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::CloneCopy::std_vector");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::CloneCopy::std_vector: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       // Tpetra wants an array of size_t, not of int.
       Teuchos::Array<size_t> columns (index.size ());
       for (std::vector<int>::size_type j = 0; j < index.size (); ++j) {
@@ -192,6 +226,23 @@ namespace Belos {
     static Teuchos::RCP<MV>
     CloneCopy (const MV& mv, const Teuchos::Range1D& index)
     {
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::CloneCopy::Range1D");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::CloneCopy::Range1D: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       const bool validRange = index.size() > 0 &&
         index.lbound() >= 0 &&
         index.ubound() < GetNumberVecs(mv);
@@ -416,14 +467,63 @@ namespace Belos {
              const MV& B,
              MV& mv)
     {
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::MvAddMv");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::MvAddMv: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
       mv.update (alpha, A, beta, B, Teuchos::ScalarTraits<Scalar>::zero ());
     }
 
     static void MvScale (MV& mv, Scalar alpha) {
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::MvScale::scalar");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::MvScale::scalar: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
       mv.scale (alpha);
     }
 
     static void MvScale (MV& mv, const std::vector<Scalar>& alphas) {
+
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::MvScale::std_vector");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::MvScale::std_vector: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
       mv.scale (alphas);
     }
 
@@ -510,6 +610,23 @@ namespace Belos {
     static void
     MvDot (const MV& A, const MV& B, std::vector<Scalar> &dots)
     {
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::MvDot");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::MvDot: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       const size_t numVecs = A.getNumVectors ();
       TEUCHOS_TEST_FOR_EXCEPTION(
         numVecs != B.getNumVectors (), std::invalid_argument,
@@ -536,6 +653,23 @@ namespace Belos {
             std::vector<typename Teuchos::ScalarTraits<Scalar>::magnitudeType>& normvec,
             NormType type=TwoNorm)
     {
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::MvNorm");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::MvNorm: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       typedef typename Teuchos::ScalarTraits<Scalar>::magnitudeType magnitude_type;
 #ifdef HAVE_TPETRA_DEBUG
       TEUCHOS_TEST_FOR_EXCEPTION(
@@ -575,6 +709,24 @@ namespace Belos {
     static void
     SetBlock (const MV& A, const std::vector<int>& index, MV& mv)
     {
+
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::SetBlock::std_vector");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::SetBlock::std_vector: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       using Teuchos::Range1D;
       using Teuchos::RCP;
       const size_t inNumVecs = A.getNumVectors ();
@@ -598,6 +750,24 @@ namespace Belos {
     static void
     SetBlock (const MV& A, const Teuchos::Range1D& index, MV& mv)
     {
+
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::SetBlock::Range1D");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::SetBlock::Range1D: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       // Range1D bounds are signed; size_t is unsigned.
       // Assignment of Tpetra::MultiVector is a deep copy.
 
@@ -675,6 +845,23 @@ namespace Belos {
     {
       const char errPrefix[] = "Belos::MultiVecTraits::Assign(A, mv): ";
 
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::Assign");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::Assign: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       // Range1D bounds are signed; size_t is unsigned.
       // Assignment of Tpetra::MultiVector is a deep copy.
 
@@ -724,6 +911,22 @@ namespace Belos {
     static void
     MvInit (MV& mv, const Scalar alpha = Teuchos::ScalarTraits<Scalar>::zero ())
     {
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::MvInit");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::MvInit: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
       mv.putScalar (alpha);
     }
 
@@ -752,6 +955,23 @@ namespace Belos {
            ::Tpetra::MultiVector<Scalar,LO,GO,Node>& Y,
            const ETrans trans = NOTRANS)
     {
+#ifdef HAVE_BELOS_TPETRA_TIMERS
+      const std::string timerName ("Belos::Apply");
+      Teuchos::RCP<Teuchos::Time> timer =
+        Teuchos::TimeMonitor::lookupCounter (timerName);
+      if (timer.is_null ()) {
+        timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(
+        timer.is_null (), std::logic_error,
+        "Belos::MultiVecTraits::Apply: "
+        "Failed to look up timer \"" << timerName << "\".  "
+        "Please report this bug to the Belos developers.");
+
+      // This starts the timer.  It will be stopped on scope exit.
+      Teuchos::TimeMonitor timeMon (*timer);
+#endif // HAVE_BELOS_TPETRA_TIMERS
+
       Teuchos::ETransp teuchosTrans = Teuchos::NO_TRANS;
       if (trans == NOTRANS) {
         teuchosTrans = Teuchos::NO_TRANS;
