@@ -4181,21 +4181,112 @@ namespace Tpetra {
       auto C_sub = Kokkos::subview (C_lcl,
                                     std::make_pair (size_t (0), C_lclNumRows),
                                     std::make_pair (size_t (0), C_numVecs));
+
+      // Add timers...
+      #ifdef HAVE_TPETRA_TIMERS
+      {
+        using Teuchos::Time;
+        using Teuchos::TimeMonitor;
+        // get the correct timer
+        using std::string;
+        using std::stringstream;
+        using std::setw;
+        using std::setfill;
+
+        stringstream ss;
+        ss << string (errPrefix)
+           << (transA ? "A^T" : "A")
+           << "x"
+           << (transB ? "B^T" : "B")
+           << "::comp::"
+           << A_lclNumRows << "x" << A_numVecs
+           << "_x_"
+           << B_lclNumRows << "x" << B_numVecs;
+
+        const string timerName = ss.str ();
+
+        Teuchos::RCP<Teuchos::Time> timer =
+          Teuchos::TimeMonitor::lookupCounter (timerName);
+        if (timer.is_null ()) {
+          timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+        }
+        TEUCHOS_TEST_FOR_EXCEPTION(
+          timer.is_null (), std::logic_error,
+          "Tpetra::dot "
+          "Failed to look up timer \"" << timerName << "\".  "
+          "Please report this bug to the Belos developers.");
+
+        // This starts the timer.  It will be stopped on scope exit.
+        Teuchos::TimeMonitor timeMon (*timer);
+      #endif // HAVE_TPETRA_TIMERS
+
       gemm_type::GEMM (transA, transB, alpha, A_sub, B_sub, beta_local, C_sub);
+
+      #ifdef HAVE_TPETRA_TIMERS
+      }
+      #endif // HAVE_TPETRA_TIMERS
     }
 
     if (! isConstantStride ()) {
       deep_copy (*this, *C_tmp); // Copy the result back into *this.
     }
 
+    // If Case 2 then sum up *this and distribute it to all processes.
+    if (Case2) {
+      // Add timers...
+      #ifdef HAVE_TPETRA_TIMERS
+      {
+        using Teuchos::Time;
+        using Teuchos::TimeMonitor;
+        // get the correct timer
+        using std::string;
+        using std::stringstream;
+        using std::setw;
+        using std::setfill;
+
+        const size_t A_lclNumRows = A_tmp->getLocalLength ();
+        const size_t A_numVecs = A_tmp->getNumVectors ();
+
+        const size_t B_lclNumRows = B_tmp->getLocalLength ();
+        const size_t B_numVecs = B_tmp->getNumVectors ();
+
+        stringstream ss;
+        ss << string (errPrefix)
+           << (transA ? "A^T" : "A")
+           << "x"
+           << (transB ? "B^T" : "B")
+           << "::comm::"
+           << A_lclNumRows << "x" << A_numVecs
+           << "_x_"
+           << B_lclNumRows << "x" << B_numVecs;
+
+        const string timerName = ss.str ();
+
+        Teuchos::RCP<Teuchos::Time> timer =
+          Teuchos::TimeMonitor::lookupCounter (timerName);
+        if (timer.is_null ()) {
+          timer = Teuchos::TimeMonitor::getNewCounter (timerName);
+        }
+        TEUCHOS_TEST_FOR_EXCEPTION(
+          timer.is_null (), std::logic_error,
+          "Tpetra::dot "
+          "Failed to look up timer \"" << timerName << "\".  "
+          "Please report this bug to the Belos developers.");
+
+        // This starts the timer.  It will be stopped on scope exit.
+        Teuchos::TimeMonitor timeMon (*timer);
+      #endif // HAVE_TPETRA_TIMERS
+
+      this->reduce ();
+
+      #ifdef HAVE_TPETRA_TIMERS
+      }
+      #endif // HAVE_TPETRA_TIMERS
+    }
+
     // Dispose of (possibly) extra copies of A and B.
     A_tmp = Teuchos::null;
     B_tmp = Teuchos::null;
-
-    // If Case 2 then sum up *this and distribute it to all processes.
-    if (Case2) {
-      this->reduce ();
-    }
   }
 
   template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node, const bool classic>
