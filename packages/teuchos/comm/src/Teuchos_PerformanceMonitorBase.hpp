@@ -326,7 +326,36 @@ namespace Teuchos
 
     //! Whether we are currently in a recursive call of the counter.
     bool isRecursiveCall_;
+
+  /*************************************************************************/
+  public:
+    static std::map< std::string, std::vector<double> > fine_grain_timers_;
+    static void addFineGrainTiming (const std::string& label, const double timing);
+    static std::map< std::string, std::vector<double> >& getFineGrainTiming ();
+  /*************************************************************************/
   };
+
+
+  /*************************************************************************/
+  template<class T>
+  std::map< std::string, std::vector<double> >
+  PerformanceMonitorBase<T>::fine_grain_timers_;
+
+  template<class T>
+  void
+  PerformanceMonitorBase<T>::addFineGrainTiming (const std::string& label, const double timing)
+  {
+    PerformanceMonitorBase<T>::fine_grain_timers_[label].push_back (timing);
+  }
+
+  template<class T>
+  std::map< std::string, std::vector<double> >&
+  PerformanceMonitorBase<T>::getFineGrainTiming ()
+  {
+    return PerformanceMonitorBase<T>::fine_grain_timers_;
+  }
+
+  /*************************************************************************/
 
   template<class T>
   TableFormat*

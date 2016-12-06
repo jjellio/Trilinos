@@ -51,9 +51,15 @@
 #include <Teuchos_GlobalMPISession.hpp>
 #include <Teuchos_oblackholestream.hpp>
 #include <algorithm>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <sstream>
+#include <vector>
+#include <chrono>
+#include <regex>
 
-using std::endl;
-
+#include <Teuchos_LAPACK_wrappers.hpp>
 //
 // These typedefs make main() as generic as possible.
 //
@@ -74,11 +80,56 @@ typedef Tpetra::CrsMatrix<scalar_type, local_ordinal_type, global_ordinal_type, 
 
 /* ******************************************************************* */
 
+extern "C" {
+  void F77_BLAS_MANGLE(ilaver,ILAVER) (int* major,int* minor,int* patch);
+}
+
+std::string
+getLapackVersion ();
+
+std::string
+getBlasLibVersion ();
+
+std::string
+getDateTime ();
+
+std::string
+getHostname ();
+
+
+std::string
+getOMP_WAIT_POLICY ();
+
+std::string
+getOMP_PLACES ();
+
+std::string
+quote (const std::string& str);
+
+void
+fineGrainMultiplyTimersToCSV (const std::string& identifier,
+                              const int rank,
+                              const std::vector<double>& timings,
+                              std::stringstream& ss,
+                              const bool ignore_first=true);
+
+void
+writeDetailsFile (const std::string& filename, const std::stringstream& data, const std::string& header);
+
+void
+gatherStrings (const std::string& str, std::stringstream& ss);
+
+std::string
+fineGrainMultiplyTimersToCSV ();
+
+/* ******************************************************************* */
+
 /// \fn main
 /// \brief Benchmark driver for (Mat)OrthoManager subclasses
-  int
+int
 main (int argc, char *argv[])
 {
+  using std::endl;
   using Belos::OrthoManager;
   using Belos::OrthoManagerFactory;
   using Belos::OutputManager;
@@ -130,6 +181,7 @@ main (int argc, char *argv[])
     // scale by the number of processes.  The default value below may be
     // changed by a command-line parameter with a corresponding name.
     int numRowsPerProcess = 100;
+    int numRowsGlobal = 100;
 
     // The OrthoManager is benchmarked with numBlocks multivectors of
     // width numCols each, for numTrials trials.  The values below are
@@ -174,6 +226,8 @@ main (int argc, char *argv[])
         "If an input matrix is given, this value is ignored, since "
         "the vectors must be commensurate with the dimensions of "
         "the matrix.");
+    cmdp.setOption ("numRowsGlobal", &numRowsGlobal,
+        "Global number of rows.");
     cmdp.setOption ("numCols", &numCols,
         "Number of columns in the input multivector (>= 1).");
     cmdp.setOption ("numBlocks", &numBlocks,
@@ -200,7 +254,8 @@ main (int argc, char *argv[])
 
     // Total number of rows in the test vector(s).
     // This may be changed if we load in a sparse matrix.
-    int numRows = numRowsPerProcess * pComm->getSize();
+    numRowsPerProcess = numRowsGlobal / pComm->getSize();
+    int numRows = numRowsGlobal;
     //
     // Validate command-line arguments
     //
@@ -311,6 +366,34 @@ main (int argc, char *argv[])
         numCols, numBlocks, numTrials,
         outMan, resultStream, displayResultsCompactly);
 
+    const auto timer_map_vectors = Teuchos::TimeMonitor::getFineGrainTiming ();
+
+    const bool ignore_first = true;
+
+    int commSize;
+    int rank;
+    MPI_Comm_size (MPI_COMM_WORLD, &commSize);
+    MPI_Comm_rank (MPI_COMM_WORLD, &rank);
+    std::stringstream ss;
+
+    for (const auto& kv : timer_map_vectors) {
+      // pack the timer data into text form
+      fineGrainMultiplyTimersToCSV (kv.first,rank, kv.second, ss, ignore_first);
+    }
+
+    std::stringstream all_strings;
+
+    // collective gather, rank 0 will fill all_strings
+    gatherStrings (ss.str (), all_strings);
+
+    if (rank == 0)
+    {
+      const std::string header = fineGrainMultiplyTimersToCSV ();
+      writeDetailsFile ("details.csv", all_strings, header);
+    }
+
+
+
     success = true;
 
     // Only Rank 0 gets to write to cout.
@@ -321,3 +404,405 @@ main (int argc, char *argv[])
 
   return ( success ? EXIT_SUCCESS : EXIT_FAILURE );
 }
+
+extern "C" {
+  void F77_BLAS_MANGLE(ilaver,ILAVER) (int* major,int* minor,int* patch);
+}
+
+std::string getLapackVersion ()
+{
+  int major, minor, patch;
+
+  F77_BLAS_MANGLE(ilaver,ILAVER) (&major, &minor, &patch);
+
+  std::stringstream ss;
+  ss << major << "." << minor << "." << patch;
+
+  return ss.str ();
+}
+
+#ifdef MKL_LIB
+
+  #include <mkl_version.h>
+
+  std::string getBlasLibVersion ()
+  {
+    /*
+        #define __INTEL_MKL_BUILD_DATE 20151022
+
+        #define __INTEL_MKL__ 11
+        #define __INTEL_MKL_MINOR__ 3
+        #define __INTEL_MKL_UPDATE__ 1
+     */
+
+    std::stringstream ss;
+
+    ss << "MKL " << __INTEL_MKL__ << "." << __INTEL_MKL_MINOR__ << "." << __INTEL_MKL_UPDATE__ << "." << __INTEL_MKL_BUILD_DATE;
+    return ss.str ();
+  }
+#elif OPENBLAS_LIB
+
+  #include <openblas_config.h>
+
+  std::string getBlasLibVersion ()
+  {
+    /*
+        #define OPENBLAS_VERSION " OpenBLAS 0.2.19.dev "
+     */
+
+    std::stringstream ss;
+
+    ss << OPENBLAS_VERSION;
+    return ss.str ();
+  }
+#elif LIBSCI_LIB
+  // No API for libsci... Compilation should pass the version
+  // -DLIBSCI_VERSION=\"${LIBSCI_VERSION}\"
+  std::string getBlasLibVersion ()
+  {
+    char * libsci_ver = LIBSCI_VERSION;
+
+    std::stringstream ss;
+    ss << "Libsci " << libsci_ver;
+    return ss.str ();
+  }
+
+#else
+  #warning("No define is specified for the blas lib being linked. Please Define one of: -DMKL_LIB, -DOPENBLAS_LIB")
+  std::string getBlasLibVersion ()
+  {
+    return "UNKNOWN";
+  }
+#endif
+
+
+std::string getDateTime ()
+{
+  using std::chrono::system_clock;
+
+  auto current_time_point = system_clock::now();
+
+  auto current_ctime = system_clock::to_time_t(current_time_point);
+  std::tm now_tm = *std::localtime(&current_ctime);
+
+  char s[1000];
+  std::strftime(s, 1000, "%c", &now_tm);
+
+  return std::string(s);
+}
+
+std::string getHostname ()
+{
+  // get the host this process ran on
+  char name[MPI_MAX_PROCESSOR_NAME];
+  int len;
+  MPI_Get_processor_name( name, &len );
+
+  return std::string(name);
+}
+
+std::string getOMP_WAIT_POLICY ()
+{
+  // query the OMP env
+  if(const char* env_omp_wait = std::getenv("OMP_WAIT_POLICY"))
+  {
+    return std::string(env_omp_wait);
+  }
+  else
+  {
+    return std::string("NOT SET");
+  }
+}
+
+std::string getOMP_PLACES ()
+{
+  // query the OMP env
+  if(const char* env_omp_places = std::getenv("OMP_PLACES"))
+  {
+    return std::string(env_omp_places);
+  }
+  else
+  {
+    return std::string("NOT SET");
+  }
+}
+
+std::string quote (const std::string& str)
+{
+  return "\"" + str + "\"";
+}
+
+
+void
+fineGrainMultiplyTimersToCSV (const std::string& identifier,
+                              const int rank,
+                              const std::vector<double>& timings,
+                              std::stringstream& ss,
+                              const bool ignore_first)
+{
+  // Tpetra::Multiply::alpha_1_beta_0_A_C_x_B_N::global::14929920x9_x_14929920x1::local::3732480x9_x_3732480x1::pre_gemm
+  using std::cout;
+  using std::endl;
+
+  int a_dim1_glb, a_dim2_glb, b_dim1_glb, b_dim2_glb;
+  int a_dim1_lcl, a_dim2_lcl, b_dim1_lcl, b_dim2_lcl;
+  double alpha, beta;
+  std::string A_trans;
+  std::string B_trans;
+  std::string stage;
+  std::string operation;
+  int numProcs;
+
+  const std::string hostname    = quote (getHostname ());
+  const std::string timestamp   = quote (getDateTime ());
+  const std::string lapack_ver  = quote (getLapackVersion ());
+  const std::string blaslib     = quote (getBlasLibVersion ());
+  const std::string wait_policy = quote (getOMP_WAIT_POLICY ());
+  const std::string omp_places  = quote (getOMP_PLACES ());
+
+  std::stringstream regex_ss;
+  std::string numeric_regex = R"(([-+]?[0-9]+\.?[0-9]*(?:[eE][-+]?[0-9]+)?))";
+  std::string integer_regex = R"((\d+))";
+  std::string text_regex = R"((\w+))";
+  regex_ss << "Tpetra::"
+           << text_regex
+           << "::alpha_"
+           << numeric_regex
+           << "_beta_"
+           << numeric_regex
+           << "_A_([CTN])_x_B_([CTN])::global::"
+           << integer_regex
+           << "x"
+           << integer_regex
+           << "_x_"
+           << integer_regex
+           << "x"
+           << integer_regex
+           << "::local::"
+           << integer_regex
+           << "x"
+           << integer_regex
+           << "_x_"
+           << integer_regex
+           << "x"
+           << integer_regex
+           << "::"
+           << text_regex;
+  std::regex e (regex_ss.str ());
+  std::smatch sm; // match into strings
+  std::regex_match (identifier,sm,e);
+
+
+  if ( sm.size () != (14+1))
+  {
+    std::stringstream err_ss;
+    err_ss   << "Regex failed to read 14 arguments"
+             << endl
+             << "Read " << sm.size ()
+             << endl
+             << "Label:"
+             << endl
+             << identifier
+             << endl
+             << "Regex:"
+             << endl
+             << regex_ss.str ()
+             << endl;
+
+    for (int i=0; i < sm.size (); ++i)
+    {
+      err_ss << "Match[" << i << "] "
+             << sm[i]
+             << endl;
+    }
+
+    std::cerr << err_ss.str ();
+    MPI_Abort(MPI_COMM_WORLD, -1);
+    return;
+  }
+  else
+  {
+    using std::stod;
+    using std::stoi;
+
+    operation = sm[1];
+    alpha = stod(sm[2]);
+    beta  = stod(sm[3]);
+    A_trans = sm[4];
+    B_trans = sm[5];
+    a_dim1_glb = stoi(sm[6]);
+    a_dim2_glb = stoi(sm[7]);
+    b_dim1_glb = stoi(sm[8]);
+    b_dim2_glb = stoi(sm[9]);
+    a_dim1_lcl = stoi(sm[10]);
+    a_dim2_lcl = stoi(sm[11]);
+    b_dim1_lcl = stoi(sm[12]);
+    b_dim2_lcl = stoi(sm[13]);
+    stage = sm[14];
+  }
+
+  MPI_Comm_size(MPI_COMM_WORLD, &numProcs);
+
+  std::stringstream ss_detail_label;
+  ss_detail_label << "Tpetra::" << operation << "::" << stage;
+  const std::string detail_label = quote (ss_detail_label.str ());
+  const std::string label = quote (
+                            (alpha == 1.0 && beta == 0.0) ? "innerProduct"
+                          : (alpha == -1.0 && beta == 1.0) ? "Update"
+                          : detail_label
+                          );
+  const int m = a_dim1_lcl;
+  const int n = a_dim2_lcl; // global and local are the same
+
+  // Label, hostname, rank, np, OMP_NUM_THREADS, OMP_WAIT_POLICY, OMP_PLACES, m (local), n, time (ns), Date, blaslib, lapack_version
+  // , detail_label, a_dim1_global, a_dim2_global, b_dim1_global, b_dim2_global
+  //               , a_dim1_local, a_dim2_local, b_dim1_local, b_dim2_local
+
+  // skip the first?
+  auto timing = timings.cbegin () + ((ignore_first) ? 1 : 0);
+
+  // create a huge string blob
+  for (; timing != timings.cend (); ++timing)
+  {
+    ss << label
+        << ","
+       << hostname
+       << ","
+       << rank
+       << ","
+       << numProcs
+       << ","
+       << omp_get_max_threads ()
+       << ","
+       << wait_policy
+       << ","
+       << omp_places
+       << ","
+       << m
+       << ","
+       << n
+       << ","
+       << *timing
+       << ","
+       << timestamp
+       << ","
+       << blaslib
+       << ","
+       << lapack_ver
+       << ","
+       << detail_label
+       << ","
+       << a_dim1_glb
+       << ","
+       << a_dim2_glb
+       << ","
+       << b_dim1_glb
+       << ","
+       << b_dim2_glb
+       << ","
+       << a_dim1_lcl
+       << ","
+       << a_dim2_lcl
+       << ","
+       << b_dim1_lcl
+       << ","
+       << b_dim2_lcl
+       << endl;
+  }
+}
+
+void writeDetailsFile (const std::string& filename, const std::stringstream& data, const std::string& header)
+{
+  using std::ofstream;
+  ofstream ofs (filename.c_str (), std::ofstream::trunc | std::ofstream::out);
+
+  // no error checking for now
+
+  ofs << header
+      << data.str ();
+
+  ofs.close ();
+}
+
+void
+gatherStrings (const std::string& str, std::stringstream& ss)
+{
+  int commSize;
+  int rank;
+  MPI_Comm_size(MPI_COMM_WORLD, &commSize);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+  std::vector<int> string_lengths;
+  if (rank == 0)
+  {
+    string_lengths.reserve (commSize);
+    string_lengths.resize (commSize);
+  }
+
+  const char * cstr = str.c_str ();
+  int length = std::char_traits<char>::length(cstr);
+
+  MPI_Gather(&length, 1, MPI_INT, &string_lengths[0], 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+  std::vector<int> displs;
+  if (rank == 0)
+  {
+    displs.reserve (commSize);
+    displs.resize (commSize);
+  }
+
+  size_t total_size = 0;
+
+  if (rank == 0)
+  {
+    for (int i=0; i < commSize; ++i)
+    {
+      displs[i] = total_size;
+      total_size += string_lengths[i];
+    }
+  }
+
+  if (total_size > INT_MAX)
+  {
+    MPI_Abort (MPI_COMM_WORLD, -1);
+  }
+
+  std::vector<char> cstrs;
+  if (rank == 0)
+  {
+    // one more byte for the null character
+    cstrs.reserve (total_size+1);
+    cstrs.resize (total_size+1);
+    cstrs[total_size] = '\0';
+  }
+
+  MPI_Gatherv (const_cast<char *> (cstr), length, MPI_CHAR,
+               &cstrs[0], &string_lengths[0], &displs[0], MPI_CHAR, 0, MPI_COMM_WORLD);
+
+  if (rank == 0)
+  {
+    const char * tmp = &cstrs[0];
+    ss << tmp;
+  }
+}
+
+
+std::string
+fineGrainMultiplyTimersToCSV ()
+{
+  // Tpetra::Multiply::alpha_1_beta_0_A_C_x_B_N::global::14929920x9_x_14929920x1::local::3732480x9_x_3732480x1::pre_gemm
+  using std::cout;
+  using std::endl;
+
+  // Label, hostname, rank, np, OMP_NUM_THREADS, OMP_WAIT_POLICY, OMP_PLACES, m (local), n, time (ns), Date, blaslib, lapack_version
+  // , detail_label, a_dim1_global, a_dim2_global, b_dim1_global, b_dim2_global
+  //               , a_dim1_local, a_dim2_local, b_dim1_local, b_dim2_local
+
+  std::stringstream ss;
+  ss << "Label, hostname, rank, np, OMP_NUM_THREADS, OMP_WAIT_POLICY, OMP_PLACES, m (local), n, time (ns),"
+     << "Date, blaslib, lapack_version, detail_label, a_dim1_global, a_dim2_global, b_dim1_global, b_dim2_global, "
+     << "a_dim1_local, a_dim2_local, b_dim1_local, b_dim2_local"
+     << endl;
+  return ss.str ();
+}
+

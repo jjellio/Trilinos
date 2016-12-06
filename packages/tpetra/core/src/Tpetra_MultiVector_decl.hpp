@@ -62,6 +62,12 @@
 #include "Tpetra_KokkosRefactor_Details_MultiVectorLocalDeepCopy.hpp"
 #include <type_traits>
 
+#define Tpetra_USE_FINE_GRAIN_TIMERS 1
+
+#ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+#include "Teuchos_TimeMonitor.hpp"
+#endif
+
 namespace Tpetra {
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS

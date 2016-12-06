@@ -715,7 +715,6 @@ public:
   static bool setParams_;
 };
 
-
 } // namespace Teuchos
 
 

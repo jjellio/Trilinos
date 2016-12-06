@@ -61,6 +61,11 @@
 #include "Kokkos_Blas1_MV.hpp"
 #include "Kokkos_Random.hpp"
 
+
+#ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+  #include <chrono>
+#endif
+
 #ifdef HAVE_TPETRA_INST_FLOAT128
 namespace Kokkos {
   // FIXME (mfh 04 Sep 2015) Just a stub for now!
@@ -3863,6 +3868,23 @@ namespace Tpetra {
     typedef MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node, classic> MV;
     const char errPrefix[] = "Tpetra::MultiVector::multiply: ";
 
+
+    #ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+    using std::chrono::steady_clock;
+    using time_point_  = steady_clock::time_point;
+
+    time_point_ tpetra_multiply_gemm_setup_start_;
+    time_point_ tpetra_multiply_gemm_setup_end_;
+    time_point_ tpetra_multiply_gemm_device_start_;
+    time_point_ tpetra_multiply_gemm_device_end_;
+    time_point_ tpetra_multiply_gemm_cleanup_start_;
+    time_point_ tpetra_multiply_gemm_cleanup_end_;
+    time_point_ tpetra_multiply_internal_reduce_start_;
+    time_point_ tpetra_multiply_internal_reduce_end_;
+    std::string tpetra_multiply_label_;
+
+    tpetra_multiply_gemm_setup_start_ = steady_clock::now ();
+    #endif
     // This routine performs a variety of matrix-matrix multiply
     // operations, interpreting the MultiVector (this-aka C , A and B)
     // as 2D matrices.  Variations are due to the fact that A, B and C
@@ -4006,12 +4028,100 @@ namespace Tpetra {
       auto C_sub = Kokkos::subview (C_lcl,
                                     std::make_pair (size_t (0), C_lclNumRows),
                                     std::make_pair (size_t (0), C_numVecs));
+
+      #ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+      // capture the overhead of preparing to call gemm
+      tpetra_multiply_gemm_setup_end_ = steady_clock::now();
+
+      tpetra_multiply_gemm_device_start_ = steady_clock::now();
+      #endif
+
       gemm_type::GEMM (transA, transB, alpha, A_sub, B_sub, beta_local, C_sub);
+
+      #ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+      // capture the overhead of preparing to call gemm
+      tpetra_multiply_gemm_device_end_ = steady_clock::now();
+
+      tpetra_multiply_gemm_cleanup_start_ = steady_clock::now();
+      #endif
     }
 
     if (! isConstantStride ()) {
       deep_copy (*this, *C_tmp); // Copy the result back into *this.
     }
+
+    #ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+    // capture the overhead of cleaning up after calling GEMM
+    tpetra_multiply_gemm_cleanup_end_ = steady_clock::now();
+
+    // outside of a timed region, form a meaningful label
+    // compute the times and store them using a meaningful label
+    const size_t A_lclNumRows = A_tmp->getLocalLength ();
+    const size_t A_numVecs = A_tmp->getNumVectors ();
+    const size_t B_lclNumRows = B_tmp->getLocalLength ();
+    const size_t B_numVecs = B_tmp->getNumVectors ();
+
+    using ss_t = std::stringstream;
+    ss_t ss;
+
+    std::string A_trans;
+    std::string B_trans;
+
+    switch (transA)
+    {
+      case CONJ_TRANS:
+        A_trans = "C";
+        break;
+
+      case NO_TRANS:
+        A_trans = "N";
+        break;
+
+      case TRANS:
+        A_trans = "T";
+        break;
+
+      default:
+        A_trans = "ERROR";
+    }
+
+    switch (transB)
+    {
+      case CONJ_TRANS:
+        B_trans = "C";
+        break;
+
+      case NO_TRANS:
+        B_trans = "N";
+        break;
+
+      case TRANS:
+        B_trans = "T";
+        break;
+
+      default:
+        B_trans = "ERROR";
+    }
+
+    ss << "Tpetra::Multiply::" << "alpha_"
+                               << (alpha == STS::one () ? int(1) : alpha)
+                               << "_"
+                               << "beta_"
+                               << (beta == STS::zero () ? int(0) : beta)
+                               << "_"
+                               << "A_" << A_trans << "_x_"
+                               << "B_" << B_trans
+                               << "::global::"
+                               << A.getGlobalLength() << "x" << A.getNumVectors()
+                               << "_x_"
+                               << B.getGlobalLength() << "x" << B.getNumVectors()
+                               << "::local::"
+                               << A_lclNumRows << "x" << A_numVecs
+                               << "_x_"
+                               << B_lclNumRows << "x" << B_numVecs;
+
+    tpetra_multiply_label_ = ss.str ();
+    #endif
 
     // Dispose of (possibly) extra copies of A and B.
     A_tmp = Teuchos::null;
@@ -4019,8 +4129,55 @@ namespace Tpetra {
 
     // If Case 2 then sum up *this and distribute it to all processes.
     if (Case2) {
+      #ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+      // capture the overhead of preparing to call gemm
+      tpetra_multiply_internal_reduce_start_ = steady_clock::now();
+      #endif
+
       this->reduce ();
+
+      #ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+      // capture the overhead of preparing to call gemm
+      tpetra_multiply_internal_reduce_end_ = steady_clock::now();
+      #endif
     }
+
+    #ifdef Tpetra_USE_FINE_GRAIN_TIMERS
+    /*
+      time_point_ tpetra_multiply_gemm_setup_start_;
+      time_point_ tpetra_multiply_gemm_setup_end_;
+      time_point_ tpetra_multiply_gemm_device_start_;
+      time_point_ tpetra_multiply_gemm_device_end_;
+      time_point_ tpetra_multiply_gemm_cleanup_start_;
+      time_point_ tpetra_multiply_gemm_cleanup_end_;
+      time_point_ tpetra_multiply_internal_reduce_start_;
+      time_point_ tpetra_multiply_internal_reduce_end_;
+    */
+    {
+      //setup
+      std::string key_ = tpetra_multiply_label_ + "::pre_gemm";
+      auto timing = tpetra_multiply_gemm_setup_end_ - tpetra_multiply_gemm_setup_start_;
+      Teuchos::TimeMonitor::addFineGrainTiming(key_, std::chrono::duration_cast<std::chrono::nanoseconds> (timing).count ());
+    }
+    {
+      //gemm
+      std::string key_ = tpetra_multiply_label_ + "::gemm_device";
+      auto timing = tpetra_multiply_gemm_device_end_ - tpetra_multiply_gemm_device_start_;
+      Teuchos::TimeMonitor::addFineGrainTiming(key_, std::chrono::duration_cast<std::chrono::nanoseconds> (timing).count ());
+    }
+    {
+      //gemm cleanup
+      std::string key_ = tpetra_multiply_label_ + "::post_gemm";
+      auto timing = tpetra_multiply_gemm_cleanup_end_ - tpetra_multiply_gemm_cleanup_start_;
+      Teuchos::TimeMonitor::addFineGrainTiming(key_, std::chrono::duration_cast<std::chrono::nanoseconds> (timing).count ());
+    }
+    {
+      //gemm cleanup
+      std::string key_ = tpetra_multiply_label_ + "::internal_reduce";
+      auto timing = tpetra_multiply_internal_reduce_end_ - tpetra_multiply_internal_reduce_start_;
+      Teuchos::TimeMonitor::addFineGrainTiming(key_, std::chrono::duration_cast<std::chrono::nanoseconds> (timing).count ());
+    }
+    #endif
   }
 
   template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node, const bool classic>
