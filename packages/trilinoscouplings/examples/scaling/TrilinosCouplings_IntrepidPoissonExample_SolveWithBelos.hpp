@@ -38,9 +38,55 @@
 #include "BelosLinearProblem.hpp"
 #include "BelosSolverFactory.hpp"
 
+// used for matching solver name
+#include <string>
+#include <regex>
 
 namespace TrilinosCouplings {
 namespace IntrepidPoissonExample {
+
+
+/// \brief report the linear solvers available in Belos
+///
+/// Report the names and parameter options available for each
+/// solver.
+template<class ST, class MV, class OP>
+void
+reportBelosSolvers (Teuchos::RCP<Teuchos::FancyOStream>& pOut)
+{
+  using std::string;
+  using Teuchos::Array;
+  using Belos::SolverFactory;
+  using Teuchos::RCP;
+  using Teuchos::ParameterList;
+  using Teuchos::parameterList;
+
+  typedef Teuchos::Array<string> string_array_type;
+  typedef Belos::SolverFactory< ST, MV, OP > belos_solver_factory_type;
+  typedef Belos::SolverManager<ST , MV, OP> belos_solver_type;
+
+  belos_solver_factory_type factory;
+  string_array_type supportedSolvers = factory.supportedSolverNames ();
+
+  string_array_type::iterator it;
+  for (it = supportedSolvers.begin (); it != supportedSolvers.end (); ++it)
+  {
+    const string& solverName = *it;
+    RCP<ParameterList> solverParams = parameterList ();
+
+    RCP<belos_solver_type> aSolver = factory.create ( solverName, solverParams);
+
+    *pOut << std::string(80, '-')
+          << std::endl
+          << solverName
+          << std::endl;
+
+    RCP< const ParameterList > solverParams1 = aSolver->getValidParameters ();
+    solverParams1->print(*pOut);
+  }
+
+}
+
 
 /// \brief Solve the linear system(s) AX=B with Belos.
 ///
@@ -87,6 +133,9 @@ namespace IntrepidPoissonExample {
 ///   iterative method should perform, regardless of whether it
 ///   converged.
 ///
+/// \param restartLength [in] The restart length of the solver (default is
+///   no restart).
+///
 /// \param num_steps [in] Number of "time steps", i.e., the number of
 //    times the solver is called in a fake time-step loop.
 ///
@@ -111,6 +160,7 @@ solveWithBelos (bool& converged,
                 const std::string& solverName,
                 const typename Teuchos::ScalarTraits<ST>::magnitudeType& tol,
                 const int maxNumIters,
+                const int restartLength,
                 const int num_steps,
                 const Teuchos::RCP<MV>& X,
                 const Teuchos::RCP<const OP>& A,
@@ -142,11 +192,29 @@ solveWithBelos (bool& converged,
     << numColsX << " columns, but B has " << numColsB << " columns.");
 
   RCP<ParameterList> belosParams = parameterList ();
+
+  std::stringstream solverLabel;
+  solverLabel << "Belos:" << solverName << "(" << restartLength << ")";
+  belosParams->set ("Timer Label", solverLabel.str());
+
   belosParams->set ("Block Size", numColsB);
   belosParams->set ("Maximum Iterations", maxNumIters);
-  belosParams->set ("Num Blocks", maxNumIters);
+  // belosParams->set ("Num Blocks", maxNumIters);
+  // configure restart length to be smaller than maxIt (200)
+  belosParams->set ("Num Blocks", restartLength);
+  // ensure the solver can restart enough times
+  belosParams->set ("Maximum Restarts", maxNumIters);
+
   belosParams->set ("Convergence Tolerance", tol);
-  if (solverName == "GMRES") {
+
+  // safe Gmres match, ignores case and matches substrings
+  // e.g., FGmres Block GMRES, etc..
+  std::regex gmres_regex ("gmres", std::regex_constants::icase );
+  std::smatch sm; // match into strings
+  std::regex_match (solverName,sm,gmres_regex);
+
+  //if (solverName == "GMRES") {
+  if (std::regex_search (solverName,sm,gmres_regex)) {
     belosParams->set ("Orthogonalization", "ICGS");
     belosParams->set ("maxNumOrthogPasses", 1);
   }

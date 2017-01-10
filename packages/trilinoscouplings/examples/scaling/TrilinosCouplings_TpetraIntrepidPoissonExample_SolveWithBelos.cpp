@@ -46,6 +46,7 @@ solveWithBelos (bool& converged,
                 const std::string& solverName,
                 const Teuchos::ScalarTraits<ST>::magnitudeType& tol,
                 const int maxNumIters,
+                const int restartLength,
                 const int num_steps,
                 const Teuchos::RCP<multivector_type>& X,
                 const Teuchos::RCP<const sparse_matrix_type>& A,
@@ -59,9 +60,21 @@ solveWithBelos (bool& converged,
   // Invoke the generic solve routine.
   IntrepidPoissonExample::solveWithBelos<ST, MV, OP> (converged, numItersPerformed,
                                                       solverName, tol, maxNumIters,
+                                                      restartLength,
                                                       num_steps,
                                                       X, A, B, M_left, M_right);
 }
+
+void
+reportBelosSolvers (Teuchos::RCP<Teuchos::FancyOStream>& pOut)
+{
+  typedef multivector_type MV;
+  typedef operator_type OP;
+
+  // Invoke the generic solve routine.
+  IntrepidPoissonExample::reportBelosSolvers<ST, MV, OP> (pOut);
+}
+
 
 /// \brief Solve the linear system(s) AX=B with Belos by cloning to a new
 /// node type.
@@ -76,6 +89,7 @@ cloneAndSolveWithBelos (
   int& numItersPerformed,
   const Teuchos::ScalarTraits<ST>::magnitudeType& tol,
   const int maxNumIters,
+  const int restartLength,
   const int num_steps,
   const Teuchos::RCP<CloneNode>& clone_node,
   const Teuchos::RCP<multivector_type>& X,
@@ -135,7 +149,7 @@ cloneAndSolveWithBelos (
   {
     TEUCHOS_FUNC_TIME_MONITOR_DIFF("Clone Solve", clone_solve);
     IntrepidPoissonExample::solveWithBelos<ST,MV,OP> (
-      converged, numItersPerformed, tol, maxNumIters, num_steps,
+      converged, numItersPerformed, tol, maxNumIters, restartLength, num_steps,
       X_clone, A_clone, B_clone, M_left_clone, M_right_clone);
   }
 
@@ -153,6 +167,7 @@ solveWithBelosGPU (
   int& numItersPerformed,
   const Teuchos::ScalarTraits<ST>::magnitudeType& tol,
   const int maxNumIters,
+  const int restartLength,
   const int num_steps,
   const int ranks_per_node,
   const int gpu_ranks_per_node,
@@ -243,7 +258,7 @@ solveWithBelosGPU (
     // communication)
     RCP<Node> node = X->getMap()->getNode();
     cloneAndSolveWithBelos(
-      converged, numItersPerformed, tol, maxNumIters, num_steps,
+      converged, numItersPerformed, tol, maxNumIters, restartLength, num_steps,
       node, X, A, B, prec_type, M_left, M_right);
   }
 

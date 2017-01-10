@@ -108,6 +108,7 @@ setUpCommandLineArguments (Teuchos::CommandLineProcessor& cmdp,
                            std::string& solverName,
                            double& tol,
                            int& maxNumIters,
+                           int& restartLength,
                            bool& verbose,
                            bool& debug)
 {
@@ -130,6 +131,12 @@ setUpCommandLineArguments (Teuchos::CommandLineProcessor& cmdp,
                   "in the input ParameterList.");
   cmdp.setOption ("maxNumIters", &maxNumIters, "Maximum number of iterations "
                   "in the linear solve.  If not specified, this is read from "
+                  "the input ParameterList (read from the XML file).  If "
+                  "specified, this overrides any value in the input "
+                  "ParameterList.");
+  cmdp.setOption ("restartLength", &restartLength, "The number of iterations "
+                  "before the linear solver will be restarted. "
+                  "If not specified, this is read from "
                   "the input ParameterList (read from the XML file).  If "
                   "specified, this overrides any value in the input "
                   "ParameterList.");

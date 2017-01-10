@@ -42,6 +42,7 @@ solveWithBelos (bool& converged,
                 const std::string& solverName,
                 const Teuchos::ScalarTraits<ST>::magnitudeType& tol,
                 const int maxNumIters,
+                const int restartLength,
                 const int num_steps,
                 const Teuchos::RCP<multivector_type>& X,
                 const Teuchos::RCP<const sparse_matrix_type>& A,
@@ -65,6 +66,7 @@ solveWithBelos (bool& converged,
   // Invoke the generic solve routine.
   IntrepidPoissonExample::solveWithBelos<ST, MV, OP> (converged, numItersPerformed,
                                                       solverName, tol, maxNumIters,
+                                                      restartLength,
                                                       num_steps,
                                                       X, A, B, Mp_left, Mp_right);
 }

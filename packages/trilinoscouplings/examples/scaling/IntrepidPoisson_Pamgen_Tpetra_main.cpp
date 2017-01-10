@@ -73,6 +73,10 @@
 
 #include <MatrixMarket_Tpetra.hpp>
 
+#ifdef KOKKOS_HAVE_OPENMP
+#include <omp.h>
+#endif
+
 int
 main (int argc, char *argv[])
 {
@@ -132,6 +136,7 @@ main (int argc, char *argv[])
     std::string xmlInputParamsFile;
     bool verbose, debug;
     int maxNumItersFromCmdLine = -1; // -1 means "read from XML file"
+    int restartLengthFromCmdLine = -1; // -1 means "read from XML file"
     double tolFromCmdLine = -1.0; // -1 means "read from XML file"
     std::string solverName = "GMRES";
     ST materialTensorOffDiagonalValue = 0.0;
@@ -144,7 +149,9 @@ main (int argc, char *argv[])
     setUpCommandLineArguments (cmdp, nx, ny, nz, xmlInputParamsFile,
                                solverName, tolFromCmdLine,
                                maxNumItersFromCmdLine,
+                               restartLengthFromCmdLine,
                                verbose, debug);
+
     cmdp.setOption ("materialTensorOffDiagonalValue",
                     &materialTensorOffDiagonalValue, "Off-diagonal value in "
                     "the material tensor.  This controls the iteration count.  "
@@ -205,12 +212,45 @@ main (int argc, char *argv[])
     int numMueluRebuilds=0;
     cmdp.setOption ("rebuild", &numMueluRebuilds, "Number of times to rebuild the MueLu hierarchy.");
 
+    // option to study the impact of restart length
+    // when true, the code will iterate over the interval
+    // [initial_restartLength, maxNumIters] collecting timings.
+    // To distinguish timers, the timer label for a solver
+    // is set to be Belos:solverName(restart_length).
+    // This naming is sufficient for vanilla solvers,
+    // but has not been tested for preconditioned solvers
+    bool restartLengthStudy = false;
+    cmdp.setOption ("restartLengthStudy", "noRestartLengthStudy",
+                    &restartLengthStudy, "If true, solves will be performed using restart "
+                        "lengths of 5 up to max iterations");
+
+    // initial length for a restart length study
+    const int initial_restartLength = 10;
+
+    // Report the linear solvers available
+    bool reportLinearSolversAndExit = false;
+    cmdp.setOption ("reportLinearSolversAndExit", "dontReportLinearSolversAndExit",
+                    &reportLinearSolversAndExit,
+                    "Query Belos::SolverFactory and report all supported solvers"
+                    "and their default parameters.");
+
     parseCommandLineArguments (cmdp, printedHelp, argc, argv, nx, ny, nz,
                                xmlInputParamsFile, solverName, verbose, debug);
     if (printedHelp) {
       // The user specified --help at the command line to print help
       // with command-line arguments.  We printed help already, so quit
       // with a happy return code.
+      return EXIT_SUCCESS;
+    }
+
+    // if requested, print solver names and options and exit
+    if (reportLinearSolversAndExit)
+    {
+      using TpetraIntrepidPoissonExample::reportBelosSolvers;
+      RCP<FancyOStream> out =
+        getFancyOStream (rcpFromRef ((myRank == 0) ? std::cout : blackHole));
+
+      reportBelosSolvers (out);
       return EXIT_SUCCESS;
     }
 
@@ -243,6 +283,42 @@ main (int argc, char *argv[])
         *out << endl;
       }
     }
+    // jjellio 09 Jan 2017
+    // Moved some initializations to this scope so they are accessible
+    // outside of the "Total Time" timer scope.
+
+    // Get the convergence tolerance for each linear solve.
+    // If the user provided a nonnegative value at the command
+    // line, it overrides any value in the input ParameterList.
+    MT tol = STM::squareroot (STM::eps ()); // default value
+    if (tolFromCmdLine < STM::zero ()) {
+      tol = inputList.get ("Convergence Tolerance", tol);
+    } else {
+      tol = tolFromCmdLine;
+    }
+
+    // Get the maximum number of iterations for each linear solve.
+    // If the user provided a value other than -1 at the command
+    // line, it overrides any value in the input ParameterList.
+    int maxNumIters = 200; // default value
+    if (maxNumItersFromCmdLine == -1) {
+      maxNumIters = inputList.get ("Maximum Iterations", maxNumIters);
+    } else {
+      maxNumIters = maxNumItersFromCmdLine;
+    }
+
+    // Optionally configure a restartable solver
+    // the default is to never restart
+    int restartLength = -1; // default value
+    if (restartLengthFromCmdLine == -1) {
+      restartLength = inputList.get ("Restart Length", restartLength);
+    } else {
+      restartLength = restartLengthFromCmdLine;
+    }
+
+    // Get the number of "time steps."  We imitate a time-dependent
+    // PDE by doing this many linear solves.
+    const int num_steps = inputList.get ("Number of Time Steps", 1);
 
     // Get Pamgen mesh definition string, either from the input
     // ParameterList or from our function that makes a cube and fills in
@@ -324,57 +400,144 @@ main (int argc, char *argv[])
         return EXIT_SUCCESS;
       }
 
+      // perform a study that explores the timings given various restart lengths
+      if (restartLengthStudy)
+      {
+        // begin with an initial restart length
+        // For each restart length, create a new solver
+        // and solve the system potentially num_steps times.
+        restartLength = initial_restartLength;
 
-      // Get the convergence tolerance for each linear solve.
-      // If the user provided a nonnegative value at the command
-      // line, it overrides any value in the input ParameterList.
-      MT tol = STM::squareroot (STM::eps ()); // default value
-      if (tolFromCmdLine < STM::zero ()) {
-        tol = inputList.get ("Convergence Tolerance", tol);
-      } else {
-        tol = tolFromCmdLine;
+        // repeat until the restart length exceeds the max
+        // number of iterations
+        while (restartLength <= maxNumIters)
+        {
+          *out << std::string(80, 'x')
+               << endl
+               << "Maximum Iterations: " << maxNumIters
+               << endl
+               << "Restart Length: " << restartLength
+               << endl
+               << "Number of Time Steps: " << num_steps
+               << endl;
+
+          // Do the linear solve(s).
+          bool converged = false;
+          int numItersPerformed = 0;
+          if (gpu) {
+            TEUCHOS_FUNC_TIME_MONITOR_DIFF("Total GPU Solve", total_solve);
+            solveWithBelosGPU (converged, numItersPerformed, tol, maxNumIters,
+                               restartLength,
+                               num_steps, ranks_per_node, gpu_ranks_per_node,
+                               device_offset, prec_type, X, A, B, Teuchos::null, M);
+          }
+          else {
+            TEUCHOS_FUNC_TIME_MONITOR_DIFF("Total Solve", total_solve);
+            solveWithBelos (converged, numItersPerformed, solverName, tol,
+                            maxNumIters,
+                            restartLength,
+                            num_steps, X, A, B, Teuchos::null, M);
+          }
+          *out << "Convereged: " << (converged ? "YES" : "NO")
+               << endl;
+
+          // because we solve multiple times, we should always reset X to
+          // its initial state. Zero is used, so that is replicated here.
+          X->putScalar (STS::zero ());
+          // increment the restart length
+          ++restartLength;
+        }
       }
+      else
+      {
+        *out << endl
+             << "Maximum Iterations: " << maxNumIters
+             << endl
+             << "Restart Length: " << restartLength
+             << endl
+             << "Number of Time Steps: " << num_steps
+             << endl;
 
-      // Get the maximum number of iterations for each linear solve.
-      // If the user provided a value other than -1 at the command
-      // line, it overrides any value in the input ParameterList.
-      int maxNumIters = 200; // default value
-      if (maxNumItersFromCmdLine == -1) {
-        maxNumIters = inputList.get ("Maximum Iterations", maxNumIters);
-      } else {
-        maxNumIters = maxNumItersFromCmdLine;
+        // Do the linear solve(s).
+        bool converged = false;
+        int numItersPerformed = 0;
+        if (gpu) {
+          TEUCHOS_FUNC_TIME_MONITOR_DIFF("Total GPU Solve", total_solve);
+          solveWithBelosGPU (converged, numItersPerformed, tol, maxNumIters,
+                             restartLength,
+                             num_steps, ranks_per_node, gpu_ranks_per_node,
+                             device_offset, prec_type, X, A, B, Teuchos::null, M);
+        }
+        else {
+          TEUCHOS_FUNC_TIME_MONITOR_DIFF("Total Solve", total_solve);
+          solveWithBelos (converged, numItersPerformed, solverName, tol,
+                          maxNumIters,
+                          restartLength,
+                          num_steps, X, A, B, Teuchos::null, M);
+        }
+
+        // Compute ||X-X_exact||_2
+        const MT norm_x = X_exact->norm2 ();
+        X_exact->update (-1.0, *X, 1.0);
+        const MT norm_error = X_exact->norm2 ();
+        *out << endl
+             << "||X - X_exact||_2 / ||X_exact||_2 = " << norm_error / norm_x
+             << endl;
       }
-
-      // Get the number of "time steps."  We imitate a time-dependent
-      // PDE by doing this many linear solves.
-      const int num_steps = inputList.get ("Number of Time Steps", 1);
-
-      // Do the linear solve(s).
-      bool converged = false;
-      int numItersPerformed = 0;
-      if (gpu) {
-        TEUCHOS_FUNC_TIME_MONITOR_DIFF("Total GPU Solve", total_solve);
-        solveWithBelosGPU (converged, numItersPerformed, tol, maxNumIters,
-                           num_steps, ranks_per_node, gpu_ranks_per_node,
-                           device_offset, prec_type, X, A, B, Teuchos::null, M);
-      }
-      else {
-        TEUCHOS_FUNC_TIME_MONITOR_DIFF("Total Solve", total_solve);
-        solveWithBelos (converged, numItersPerformed, solverName, tol,
-                        maxNumIters, num_steps, X, A, B, Teuchos::null, M);
-      }
-
-      // Compute ||X-X_exact||_2
-      const MT norm_x = X_exact->norm2 ();
-      X_exact->update (-1.0, *X, 1.0);
-      const MT norm_error = X_exact->norm2 ();
-      *out << endl
-           << "||X - X_exact||_2 / ||X_exact||_2 = " << norm_error / norm_x
-           << endl;
     } // total time block
 
     // Summarize timings
     Teuchos::TimeMonitor::report (comm.ptr (), std::cout);
+
+
+    // jjellio 09 Jan 2017
+    //   YAML output for easier parsing.
+    // Filename is chosen based on parameters and the number
+    // of threads and processes chosen. This is currently
+    // intended to provided information relevant to OpenMP
+    // threaded solves.
+    // TODO add GPU/Pthread/Qthread/Serial support
+    std::ostream* os = &std::cout;
+    std::ofstream fptr;
+    // only one worker writes a file
+    if (myRank == 0)
+    {
+      int num_threads = 0;
+
+      #ifdef KOKKOS_HAVE_OPENMP
+        num_threads = omp_get_max_threads ();
+      #endif
+
+      std::stringstream filename;
+      filename
+         << "poisson_" << nx << "x" << ny << "x" << nz
+         << "_solver-" << solverName;
+
+      if (restartLengthStudy)
+        filename << "-" << initial_restartLength << "-" << maxNumIters;
+      else
+        filename << "-" << maxNumIters;
+
+      filename
+         << "_numsteps-" << num_steps
+         << "_threads-" << num_threads
+         << "_np-" << comm->getSize()
+         << ".yaml";
+
+      fptr.open(filename.str (), std::ofstream::out);
+      os = &fptr;
+    }
+
+    RCP<ParameterList> yaml_config = parameterList ();
+    yaml_config->set("Report format", "YAML");
+
+    Teuchos::TimeMonitor::report (comm.ptr (), *os, yaml_config);
+
+    // close the file
+    if (myRank == 0)
+    {
+      fptr.close ();
+    }
   } // try
   TEUCHOS_STANDARD_CATCH_STATEMENTS(true, std::cerr, success);
 

@@ -148,6 +148,7 @@ setUpCommandLineArguments (Teuchos::CommandLineProcessor& cmdp,
                            std::string& solverName,
                            double& tol,
                            int& maxNumIters,
+                           int& restartLength,
                            bool& verbose,
                            bool& debug);
 

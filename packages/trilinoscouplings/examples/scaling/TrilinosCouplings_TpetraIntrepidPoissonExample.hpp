@@ -215,6 +215,9 @@ exactResidualNorm (const Teuchos::RCP<const sparse_matrix_type>& A,
 ///   iterative method should perform, regardless of whether it
 ///   converged.
 ///
+/// \param restartLength [in] The restart length of the solver (default is
+///   no restart).
+///
 /// \param num_steps [in] Number of "time steps", i.e., the number of
 //    times the solver is called in a fake time-step loop.
 ///
@@ -238,6 +241,7 @@ solveWithBelos (bool& converged,
                 const std::string& solverName,
                 const Teuchos::ScalarTraits<ST>::magnitudeType& tol,
                 const int maxNumIters,
+                const int restartLength,
                 const int num_steps,
                 const Teuchos::RCP<multivector_type>& X,
                 const Teuchos::RCP<const sparse_matrix_type>& A,
@@ -271,6 +275,7 @@ solveWithBelosGPU (
   int& numItersPerformed,
   const Teuchos::ScalarTraits<ST>::magnitudeType& tol,
   const int maxNumIters,
+  const int restartLength,
   const int num_steps,
   const int ranks_per_node,
   const int gpu_ranks_per_node,
@@ -281,6 +286,13 @@ solveWithBelosGPU (
   const Teuchos::RCP<const multivector_type>& B,
   const Teuchos::RCP<const operator_type>& M_left=Teuchos::null,
   const Teuchos::RCP<const operator_type>& M_right=Teuchos::null);
+
+/// \brief report the linear solvers available in Belos
+///
+/// Report the names and parameter options available for each
+/// solver.
+void
+reportBelosSolvers (Teuchos::RCP<Teuchos::FancyOStream>& pOut);
 
 } // namespace TpetraIntrepidPoissonExample
 } // namespace TrilinosCouplings

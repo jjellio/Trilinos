@@ -148,6 +148,7 @@ main (int argc, char *argv[])
     std::string xmlInputParamsFile;
     bool verbose, debug;
     int maxNumItersFromCmdLine = -1; // -1 means "read from XML file"
+    int restartLengthFromCmdLine = -1; // -1 means "read from XML file"
     double tolFromCmdLine = -1.0; // -1 means "read from XML file"
     std::string solverName = "GMRES";
     ST materialTensorOffDiagonalValue = 0.0;
@@ -160,6 +161,7 @@ main (int argc, char *argv[])
     setUpCommandLineArguments (cmdp, nx, ny, nz, xmlInputParamsFile,
                                solverName, tolFromCmdLine,
                                maxNumItersFromCmdLine,
+                               restartLengthFromCmdLine,
                                verbose, debug);
     cmdp.setOption ("materialTensorOffDiagonalValue",
                     &materialTensorOffDiagonalValue, "Off-diagonal value in "
@@ -313,6 +315,14 @@ main (int argc, char *argv[])
         maxNumIters = maxNumItersFromCmdLine;
       }
 
+
+      int restartLength = maxNumIters; // default value
+      if (restartLengthFromCmdLine == -1) {
+        restartLength = inputList.get ("Restart Length", restartLength);
+      } else {
+        restartLength = restartLengthFromCmdLine;
+      }
+
       // Get the number of "time steps."  We imitate a time-dependent
       // PDE by doing this many linear solves.
       const int num_steps = inputList.get ("Number of Time Steps", 1);
@@ -323,7 +333,7 @@ main (int argc, char *argv[])
       {
         TEUCHOS_FUNC_TIME_MONITOR_DIFF("Total Solve", total_solve);
         solveWithBelos (converged, numItersPerformed, solverName, tol,
-                        maxNumIters, num_steps, X, A, B, Teuchos::null, M);
+                        maxNumIters, restartLength, num_steps, X, A, B, Teuchos::null, M);
       }
 
       // Compute ||X-X_exact||_2
