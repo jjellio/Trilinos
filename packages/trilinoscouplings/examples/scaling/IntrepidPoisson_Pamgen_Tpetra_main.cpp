@@ -309,7 +309,7 @@ main (int argc, char *argv[])
 
     // Optionally configure a restartable solver
     // the default is to never restart
-    int restartLength = -1; // default value
+    int restartLength = 0; // default value
     if (restartLengthFromCmdLine == -1) {
       restartLength = inputList.get ("Restart Length", restartLength);
     } else {
@@ -445,7 +445,7 @@ main (int argc, char *argv[])
           // its initial state. Zero is used, so that is replicated here.
           X->putScalar (STS::zero ());
           // increment the restart length
-          ++restartLength;
+          restartLength += 5;
         }
       }
       else
@@ -497,7 +497,7 @@ main (int argc, char *argv[])
     // intended to provided information relevant to OpenMP
     // threaded solves.
     // TODO add GPU/Pthread/Qthread/Serial support
-    std::ostream* os = &std::cout;
+    std::ostream* os = out.get ();
     std::ofstream fptr;
     // only one worker writes a file
     if (myRank == 0)
