@@ -139,6 +139,7 @@ main (int argc, char *argv[])
     int restartLengthFromCmdLine = -1; // -1 means "read from XML file"
     double tolFromCmdLine = -1.0; // -1 means "read from XML file"
     std::string solverName = "GMRES";
+    const int defaultMaxNumIters = 200;
     ST materialTensorOffDiagonalValue = 0.0;
 
     // Set default values of command-line arguments.
@@ -227,6 +228,19 @@ main (int argc, char *argv[])
     // initial length for a restart length study
     const int initial_restartLength = 10;
 
+    int restartLengthStudy_start = initial_restartLength;
+    cmdp.setOption ("restartLengthStudy_start",
+                    &restartLengthStudy_start, "The initial restart length to use.");
+
+    int restartLengthStudy_stop = defaultMaxNumIters;
+    cmdp.setOption ("restartLengthStudy_stop",
+                    &restartLengthStudy_stop, "The largest restart length to use.");
+
+    int restartLengthStudy_inc = 5;
+    cmdp.setOption ("restartLengthStudy_inc",
+                    &restartLengthStudy_inc, "The increment between restart lengths.");
+
+
     // Report the linear solvers available
     bool reportLinearSolversAndExit = false;
     cmdp.setOption ("reportLinearSolversAndExit", "dontReportLinearSolversAndExit",
@@ -300,7 +314,7 @@ main (int argc, char *argv[])
     // Get the maximum number of iterations for each linear solve.
     // If the user provided a value other than -1 at the command
     // line, it overrides any value in the input ParameterList.
-    int maxNumIters = 200; // default value
+    int maxNumIters = defaultMaxNumIters; // default value
     if (maxNumItersFromCmdLine == -1) {
       maxNumIters = inputList.get ("Maximum Iterations", maxNumIters);
     } else {
@@ -309,7 +323,7 @@ main (int argc, char *argv[])
 
     // Optionally configure a restartable solver
     // the default is to never restart
-    int restartLength = -1; // default value
+    int restartLength = maxNumIters; // default value
     if (restartLengthFromCmdLine == -1) {
       restartLength = inputList.get ("Restart Length", restartLength);
     } else {
@@ -406,11 +420,11 @@ main (int argc, char *argv[])
         // begin with an initial restart length
         // For each restart length, create a new solver
         // and solve the system potentially num_steps times.
-        restartLength = initial_restartLength;
+        restartLength = restartLengthStudy_start;
 
         // repeat until the restart length exceeds the max
         // number of iterations
-        while (restartLength <= maxNumIters)
+        while (restartLength <= restartLengthStudy_stop)
         {
           *out << std::string(80, 'x')
                << endl
@@ -445,7 +459,7 @@ main (int argc, char *argv[])
           // its initial state. Zero is used, so that is replicated here.
           X->putScalar (STS::zero ());
           // increment the restart length
-          ++restartLength;
+          restartLength += restartLengthStudy_inc;
         }
       }
       else
