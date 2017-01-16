@@ -214,11 +214,10 @@ solveWithBelos (bool& converged,
   std::regex_match (solverName,sm,gmres_regex);
 
   //if (solverName == "GMRES") {
-  if (std::regex_search (solverName,sm,gmres_regex)) {
-    belosParams->set ("Orthogonalization", "ICGS");
-    belosParams->set ("maxNumOrthogPasses", 1);
-  }
-  belosParams->set ("Output Frequency", 10);
+  belosParams->set ("Orthogonalization", "ICGS");
+  belosParams->set ("maxNumOrthogPasses", 2);
+  
+belosParams->set ("Output Frequency", 10);
   belosParams->set ("Output Style", 1);
   belosParams->set ("Verbosity", 33);
 
@@ -230,6 +229,7 @@ solveWithBelos (bool& converged,
     problem->setRightPrec (M_right);
   }
 
+  problem->setLabel ( solverLabel.str () );
   // Create solver
   RCP<solver_type> solver;
   {
