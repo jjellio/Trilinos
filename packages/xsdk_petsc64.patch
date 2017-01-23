@@ -1,0 +1,50 @@
+From 84616a95c59674a4e294c2f17f6891f32ee2948d Mon Sep 17 00:00:00 2001
+From: James Elliott <jjellio@sandia.gov>
+Date: Sun, 22 Jan 2017 19:48:38 -0700
+Subject: [PATCH] The types used in the Tpetra interface need to be PetscTypes,
+ so they are are correct for the types petsc was configured with. (e.g., 64bit
+ or 32bit indices)
+
+---
+ petsc/src/BelosPETScSolMgr.hpp      | 4 ++--
+ petsc/src/Tpetra_PETScAIJMatrix.hpp | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/petsc/src/BelosPETScSolMgr.hpp b/petsc/src/BelosPETScSolMgr.hpp
+index 88df545..e87ebc5 100644
+--- a/petsc/src/BelosPETScSolMgr.hpp
++++ b/petsc/src/BelosPETScSolMgr.hpp
+@@ -48,7 +48,7 @@
+     \brief Pure virtual base class which describes the basic interface for a solver manager.
+ */
+ 
+-#include "xSDKTrilinos_config.hpp"
++//#include "xSDKTrilinos_config.hpp"
+ 
+ #include "BelosConfigDefs.hpp"
+ #include "BelosTypes.hpp"
+@@ -685,7 +685,7 @@ ReturnType PETScSolMgr<ScalarType,MV,OP>::solve()
+ 
+     // Get the number of iterations
+     ierr = KSPGetIterationNumber(solver,&tmpInt); CHKERRCONTINUE(ierr);
+-    numIters_ = std::max(tmpInt,numIters_);
++    numIters_ = std::max((int) tmpInt,numIters_);
+ 
+     // Get the residual
+     ierr = KSPBuildResidual(solver,NULL,NULL,&petscR); CHKERRCONTINUE(ierr);
+diff --git a/petsc/src/Tpetra_PETScAIJMatrix.hpp b/petsc/src/Tpetra_PETScAIJMatrix.hpp
+index 3a0da09..5b7a430 100644
+--- a/petsc/src/Tpetra_PETScAIJMatrix.hpp
++++ b/petsc/src/Tpetra_PETScAIJMatrix.hpp
+@@ -465,7 +465,7 @@ void PETScAIJMatrix<Scalar,LO,GO,Node>::apply(const MV & X, MV & Y, Teuchos::ETr
+   ArrayRCP< ArrayRCP<Scalar> > yView = Y.get2dViewNonConst();
+ 
+   double *vals=0;
+-  int length;
++  PetscInt length;
+   Vec petscX, petscY;
+   int ierr;
+   for(int i=0; i < numVectors; i++)
+-- 
+2.7.4
+
