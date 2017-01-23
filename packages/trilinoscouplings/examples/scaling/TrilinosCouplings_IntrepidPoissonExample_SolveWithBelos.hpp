@@ -38,9 +38,14 @@
 #include "BelosLinearProblem.hpp"
 #include "BelosSolverFactory.hpp"
 
+#include <BelosPETScSolMgr.hpp>
+
 // used for matching solver name
 #include <string>
 #include <regex>
+
+extern "C" int global_argc;
+extern "C" char** global_argv;
 
 namespace TrilinosCouplings {
 namespace IntrepidPoissonExample {
@@ -182,6 +187,8 @@ solveWithBelos (bool& converged,
   converged = false;
   numItersPerformed = 0;
 
+  const bool usePetsc = true;
+
   TEUCHOS_TEST_FOR_EXCEPTION(A.is_null () || X.is_null () || B.is_null (),
     std::invalid_argument, "solveWithBelos: The A, X, and B arguments must all "
     "be nonnull.");
@@ -232,9 +239,19 @@ solveWithBelos (bool& converged,
 
   // Create solver
   RCP<solver_type> solver;
+  if (usePetsc == false)
   {
     solver_factory_type factory;
     solver = factory.create (solverName, belosParams);
+  }
+  else
+  {
+    typedef Belos::PETScSolMgr <ST, MV, OP> petsc_solver_type;
+    
+    RCP<petsc_solver_type> _solver = rcp( new Belos::PETScSolMgr <ST, MV, OP> (problem , rcp ( &(*belosParams), false)) );
+    _solver->setCLA(global_argc, global_argv );
+    solver = _solver;
+    
   }
 
   // Enter "time step" loop -- we're really solving the same system repeatedly

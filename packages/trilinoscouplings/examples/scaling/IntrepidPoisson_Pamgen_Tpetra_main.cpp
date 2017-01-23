@@ -77,6 +77,9 @@
 #include <omp.h>
 #endif
 
+int global_argc;
+char** global_argv;
+
 int
 main (int argc, char *argv[])
 {
@@ -116,6 +119,10 @@ main (int argc, char *argv[])
   typedef TpetraIntrepidPoissonExample::vector_type vector_type;
   typedef TpetraIntrepidPoissonExample::operator_type operator_type;
 
+  global_argc=argc;
+  global_argv=argv;
+
+
   bool success = true;
   try {
     Teuchos::oblackholestream blackHole;
@@ -145,7 +152,7 @@ main (int argc, char *argv[])
     setCommandLineArgumentDefaults (nx, ny, nz, xmlInputParamsFile,
                                     solverName, verbose, debug);
     // Parse and validate command-line arguments.
-    Teuchos::CommandLineProcessor cmdp (false, true);
+    Teuchos::CommandLineProcessor cmdp (false, false);
     setUpCommandLineArguments (cmdp, nx, ny, nz, xmlInputParamsFile,
                                solverName, tolFromCmdLine,
                                maxNumItersFromCmdLine,
