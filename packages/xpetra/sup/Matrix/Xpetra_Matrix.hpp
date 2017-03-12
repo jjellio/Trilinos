@@ -63,6 +63,9 @@
 #include "Xpetra_StridedMap.hpp"
 #include "Xpetra_StridedMapFactory.hpp"
 
+// forward declaraation for CrsMatrixWrap (needed by the to{T,E}petra routines)
+#include "Xpetra_CrsMatrixWrap_fwd.hpp"
+
 #include <Teuchos_SerialDenseMatrix.hpp>
 #include <Teuchos_Hashtable.hpp>
 
@@ -604,6 +607,39 @@ namespace Xpetra {
       viewLabel_t currentViewLabel_;  // label of the current view
 
   }; //class Matrix
+
+
+#ifdef HAVE_XPETRA_TPETRA
+#include <Tpetra_CrsMatrix.hpp>
+
+  //! @brief Convert an Xpetra::Matrix to Tpetra::CrsMatrix
+  template <class Scalar,
+            class LocalOrdinal,
+            class GlobalOrdinal,
+            class Node>
+  Teuchos::RCP<const Tpetra::CrsMatrix<Scalar,LocalOrdinal,GlobalOrdinal,Node> >
+  toTpetra(Teuchos::RCP<Xpetra::Matrix<Scalar,LocalOrdinal,GlobalOrdinal,Node> > &Xpetra_Matrix) {
+
+    using Teuchos::RCP;
+
+    // Cast the Xpetra matrix
+   RCP<Xpetra::CrsMatrixWrap<Scalar,LocalOrdinal,GlobalOrdinal,Node> > Xpetra_MatrixWrap =
+      Teuchos::rcp_dynamic_cast<Xpetra::CrsMatrixWrap<Scalar,LocalOrdinal,GlobalOrdinal,Node> >(Xpetra_Matrix);
+
+    // Extract the CrsMatrix object
+    RCP<CrsMatrix<Scalar,LocalOrdinal,GlobalOrdinal,Node> > Xpetra_CrsMatrix = Xpetra_MatrixWrap->getCrsMatrix();
+
+    // Cast it into a TpetraCrsMatrix object
+    RCP<TpetraCrsMatrix<Scalar,LocalOrdinal,GlobalOrdinal,Node> > Tpetra_Xpetra_CrsMatrix =
+      Teuchos::rcp_dynamic_cast<TpetraCrsMatrix<Scalar,LocalOrdinal,GlobalOrdinal,Node> >(Xpetra_CrsMatrix);
+
+    // Finally get access to the underlying Tpetra::CrsMatrix
+    RCP<const Tpetra::CrsMatrix<Scalar,LocalOrdinal,GlobalOrdinal,Node> > Tpetra_CrsMatrix =
+      Tpetra_Xpetra_CrsMatrix->getTpetra_CrsMatrix();
+
+    return Tpetra_CrsMatrix;
+  }
+#endif
 
 } //namespace Xpetra
 
