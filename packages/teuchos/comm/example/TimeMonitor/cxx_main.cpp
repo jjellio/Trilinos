@@ -71,16 +71,37 @@ int main(int argc, char* argv[])
   MPI_Init(&argc, &argv);
 #endif
 
-  // Apply the quadratic function.
-  for( i=-100; i<100; i++ ) {
-    x = quadFunc( (double) i );
-    (void)x; // Not used!
-  }
+  RCP<Time> TotalTime = TimeMonitor::getNewCounter("Total Time");
+  RCP<Time> CompTime2 = TimeMonitor::getNewCounter("Total Time Quad");
+  RCP<Time> FacTime2 = TimeMonitor::getNewCounter("Total Time Fac");
+  int constexpr MAX_EXP = 2;
+  {
+    Teuchos::TimeMonitor LocalTimer(*TotalTime);
+    for (int k=0; k < MAX_EXP; ++k) {
 
-  // Apply the factorial function.
-  for( i=0; i<100; i++ ) {
-    x = factFunc( i );
-    (void)x; // Not used!
+      {
+        Teuchos::TimeMonitor LocalTimer1(*CompTime2);
+        // Apply the quadratic function.
+        for( i=-10000; i<10000; i++ ) {
+          x = quadFunc( (double) i );
+          (void)x; // Not used!
+        }
+      }
+
+      {
+        Teuchos::TimeMonitor LocalTimer2(*FacTime2);
+        // Apply the factorial function.
+        for( i=0; i<100; i++ ) {
+          x = factFunc( i );
+          (void)x; // Not used!
+        }
+      }
+
+      if (k != (MAX_EXP-1)) {
+      CompTime->reset ();
+      FactTime->reset ();
+      }
+    }
   }
 
   // Get a summary from the time monitor.

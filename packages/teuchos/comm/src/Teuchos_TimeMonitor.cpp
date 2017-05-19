@@ -243,7 +243,12 @@ namespace Teuchos {
   // helper functions.  The map is keyed on timer label (a string).
   // Each value is a pair: (total number of seconds over all calls to
   // that timer, total number of calls to that timer).
+
+#ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+  typedef std::map<std::string, Teuchos::Time::descriptive_stat_map_type > timer_map_t;
+#else
   typedef std::map<std::string, std::pair<double, int> > timer_map_t;
+#endif
 
   TimeMonitor::TimeMonitor (Time& timer, bool reset)
     : PerformanceMonitorBase<Time>(timer, reset)
@@ -313,10 +318,21 @@ namespace Teuchos {
     // count.  This function does not actually create a timer.
     //
     // \param name The timer's name.
+
+  #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+    std::pair<std::string, Teuchos::Time::descriptive_stat_map_type>
+  #else
     std::pair<std::string, std::pair<double, int> >
+  #endif
     makeEmptyTimerDatum (const std::string& name)
     {
-      return std::make_pair (name, std::make_pair (double(0), int(0)));
+
+      #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+        Teuchos::Time::descriptive_stat_map_type tmp_descriptive_stats;
+        return std::make_pair (name, tmp_descriptive_stats);
+      #else
+        return std::make_pair (name, std::make_pair (double(0), int(0)));
+      #endif
     }
 
     // \fn collectLocalTimerData
@@ -353,19 +369,37 @@ namespace Teuchos {
         // Filter string must _start_ the timer label, not just be in it.
         const bool skipThisOne = (filter != "" && name.find (filter) != 0);
         if (! skipThisOne) {
-          const double timing = it->second->totalElapsedTime ();
-          const int numCalls = it->second->numCalls ();
+
+          #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+            Teuchos::Time::descriptive_stat_map_type tmp_descriptive_stats;
+            it->second->computeDescriptiveStats (tmp_descriptive_stats);
+          #else
+            const double timing = it->second->totalElapsedTime ();
+            const int numCalls = it->second->numCalls ();
+          #endif
 
           // Merge timers with duplicate labels, by summing their
           // total elapsed times and call counts.
           iter_t loc = theLocalData.find (name);
           if (loc == theLocalData.end()) {
             // Use loc as an insertion location hint.
-            theLocalData.insert (loc, make_pair (name, make_pair (timing, numCalls)));
+            #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+              theLocalData.insert (loc, make_pair (name, tmp_descriptive_stats));
+            #else
+              theLocalData.insert (loc, make_pair (name, make_pair (timing, numCalls)));
+            #endif
           }
           else {
-            loc->second.first += timing;
-            loc->second.second += numCalls;
+            // jjellio: It is not clear how this case is possible with a std::map as the container.
+            // This could happen with a multimap, or some type that allows duplicate keys.
+            // The localData temporary is empty to begin with, therefore its keys will mirror
+            // the localCounter keys.
+            // Am I missing something??
+            #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+            #else
+              loc->second.first += timing;
+              loc->second.second += numCalls;
+            #endif
           }
         }
       }
@@ -385,9 +419,19 @@ namespace Teuchos {
       timer_map_t newTimerData;
       for (timer_map_t::const_iterator it = timerData.begin();
            it != timerData.end(); ++it) {
-        if (it->second.second > 0) {
-          newTimerData[it->first] = it->second;
-        }
+
+        #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+          typedef Teuchos::Time::descriptive_stat_map_type::const_iterator const_iterator;
+          const_iterator count_loc = it->second.find (Teuchos::Time::DS_numCalls_KEY);
+          int num_observations =  (count_loc == it->second.end()) ? 0 : static_cast<double> (count_loc->second);
+          if (num_observations > 0) {
+              newTimerData[it->first] = it->second;
+          }
+        #else
+          if (it->second.second > 0) {
+            newTimerData[it->first] = it->second;
+          }
+        #endif
       }
       timerData.swap (newTimerData);
     }
@@ -680,7 +724,17 @@ namespace Teuchos {
       timingsAndCallCounts.reserve (numTimers);
       for (timer_map_t::const_iterator it = globalTimerData.begin();
            it != globalTimerData.end(); ++it) {
-        timingsAndCallCounts.push_back (it->second);
+        #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+          typedef Teuchos::Time::descriptive_stat_map_type::const_iterator const_iterator;
+          const_iterator total_loc = it->second.find (Teuchos::Time::DS_TOTAL_TIME_KEY);
+          const_iterator count_loc = it->second.find (Teuchos::Time::DS_numCalls_KEY);
+          double total_time =  (total_loc == it->second.end()) ? 0.0 : total_loc->second;
+          int num_observations =  (count_loc == it->second.end()) ? 0 : static_cast<double> (count_loc->second);
+
+          timingsAndCallCounts.push_back (std::pair<double, int> (total_time, num_observations));
+        #else
+          timingsAndCallCounts.push_back (it->second);
+        #endif
       }
 
       // For each timer name, compute the min timing and its
@@ -973,8 +1027,19 @@ namespace Teuchos {
       Array<double> localNumCalls;
       for (timer_map_t::const_iterator it = localTimerData.begin();
            it != localTimerData.end(); ++it) {
-        localTimings.push_back (it->second.first);
-        localNumCalls.push_back (static_cast<double> (it->second.second));
+        #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+          typedef Teuchos::Time::descriptive_stat_map_type::const_iterator const_iterator;
+          const_iterator total_loc = it->second.find (Teuchos::Time::DS_TOTAL_TIME_KEY);
+          const_iterator count_loc = it->second.find (Teuchos::Time::DS_numCalls_KEY);
+          double total_time =  (total_loc == it->second.end()) ? 0.0 : total_loc->second;
+          int num_observations =  (count_loc == it->second.end()) ? 0 : static_cast<double> (count_loc->second);
+
+          localTimings.push_back (total_time);
+          localNumCalls.push_back (num_observations);
+        #else
+          localTimings.push_back (it->second.first);
+          localNumCalls.push_back (static_cast<double> (it->second.second));
+        #endif
       }
       TableColumn timeAndCalls (localTimings, localNumCalls, precision, true);
       tableColumns.append (timeAndCalls);
@@ -992,8 +1057,20 @@ namespace Teuchos {
         Array<double> globalNumCalls;
         for (timer_map_t::const_iterator it = globalTimerData.begin();
              it != globalTimerData.end(); ++it) {
-          globalTimings.push_back (it->second.first);
-          globalNumCalls.push_back (static_cast<double> (it->second.second));
+
+          #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+            typedef Teuchos::Time::descriptive_stat_map_type::const_iterator const_iterator;
+            const_iterator total_loc = it->second.find (Teuchos::Time::DS_TOTAL_TIME_KEY);
+            const_iterator count_loc = it->second.find (Teuchos::Time::DS_numCalls_KEY);
+            double total_time =  (total_loc == it->second.end()) ? 0.0 : total_loc->second;
+            int num_observations =  (count_loc == it->second.end()) ? 0 : static_cast<double> (count_loc->second);
+
+            globalTimings.push_back (total_time);
+            globalNumCalls.push_back (num_observations);
+          #else
+            globalTimings.push_back (it->second.first);
+            globalNumCalls.push_back (static_cast<double> (it->second.second));
+          #endif
         }
         // Print the table column.
         titles.append ("Global time (num calls)");

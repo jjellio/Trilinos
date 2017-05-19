@@ -140,6 +140,7 @@ namespace Teuchos {
 ///   of \c TimeMonitor::computeGlobalTimerStatistics().
 typedef std::map<std::string, std::vector<std::pair<double, double> > > stat_map_type;
 
+
 /// \class TimeMonitor
 /// \brief A scope-safe timer wrapper class, that can compute global timer statistics.
 ///

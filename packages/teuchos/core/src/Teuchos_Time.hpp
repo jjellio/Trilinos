@@ -66,6 +66,15 @@
 #endif
 
 
+#define TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS 1
+//#define TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS_PREALLOCATE 1
+
+#ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+//#include <Teuchos_Array.hpp>
+#include <vector>
+#include <algorithm>
+#endif
+
 namespace Teuchos {
 
 
@@ -127,6 +136,9 @@ public:
   ///   return wallTime(), regardless of the actual start time.
   double totalElapsedTime (bool readCurrentTime = false) const;
 
+
+  void computeDescriptiveStats (std::map<std::string, double>& stat_map) const;
+
   //! Reset the cummulative time and call count.
   void reset ();
 
@@ -158,6 +170,28 @@ private:
   bool enabled_;
   std::string name_;
   int numCalls_;
+
+  /*
+   * 18 May 2017 (jjellio)
+   *   Add descriptive statistics.
+   *   To do this, we need to store the actual timings. We assume that is the timer is nested
+   *   that the logic for incrementing the timer correctly hanldes whether increment is called or not
+   *   For every increment, we store the delta.
+   */
+  #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+    std::vector<double> observations_;
+public:
+    typedef std::map<std::string, double> descriptive_stat_map_type;
+
+    static constexpr const char* DS_TOTAL_TIME_KEY = "Total Time";
+    static constexpr const char* DS_NUM_OBSERVATIONS_KEY = "Num Observations";
+    static constexpr const char* DS_numCalls_KEY = "numCalls";
+private:
+    #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS_PREALLOCATE
+      static constexpr size_t DESCRIPTIVE_STATISTICS_MAX_NUM_TIMINGS = 1024*1024;
+      int observation_idx_;
+    #endif
+  #endif
 };
 
 
