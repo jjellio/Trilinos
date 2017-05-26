@@ -51,14 +51,15 @@
 using namespace Teuchos;
 
 // Global Timers
-RCP<Time> CompTime = TimeMonitor::getNewCounter("Computational Time");
-RCP<Time> FactTime = TimeMonitor::getNewCounter("Factorial Time");
+RCP<Time> CompTime = TimeMonitor::getNewCounter("Quad Inner");
+RCP<Time> FactTime = TimeMonitor::getNewCounter("Factorial Inner");
 
 // Quadratic function declaration.
 double quadFunc( double x );
 
 // Factorial function declaration.
 double factFunc( int x );
+
 
 int main(int argc, char* argv[])
 {
@@ -72,17 +73,18 @@ int main(int argc, char* argv[])
 #endif
 
   RCP<Time> TotalTime = TimeMonitor::getNewCounter("Total Time");
-  RCP<Time> CompTime2 = TimeMonitor::getNewCounter("Total Time Quad");
-  RCP<Time> FacTime2 = TimeMonitor::getNewCounter("Total Time Fac");
-  int constexpr MAX_EXP = 2;
+  RCP<Time> CompTime2 = TimeMonitor::getNewCounter("Quad Outer");
+  RCP<Time> FacTime2 = TimeMonitor::getNewCounter("Factorial Outer");
+  int constexpr MAX_EXP = 1500;
   {
     Teuchos::TimeMonitor LocalTimer(*TotalTime);
     for (int k=0; k < MAX_EXP; ++k) {
 
+      MPI_Barrier(MPI_COMM_WORLD);
       {
         Teuchos::TimeMonitor LocalTimer1(*CompTime2);
         // Apply the quadratic function.
-        for( i=-10000; i<10000; i++ ) {
+        for( i=-5000; i<5000; i++ ) {
           x = quadFunc( (double) i );
           (void)x; // Not used!
         }
@@ -97,9 +99,9 @@ int main(int argc, char* argv[])
         }
       }
 
-      if (k != (MAX_EXP-1)) {
-      CompTime->reset ();
-      FactTime->reset ();
+      if (k % 100 == 0) {
+        // Get a summary from the time monitor.
+        TimeMonitor::summarize();
       }
     }
   }
@@ -120,8 +122,12 @@ double quadFunc( double x )
   // Construct a local time monitor, this starts the CompTime timer and will stop when leaving scope.
   Teuchos::TimeMonitor LocalTimer(*CompTime);
 
+  double v = 0.0;
   // Evaluate the quadratic function.
-  return ( x*x - 1.0 );
+  for (int i=1; i<10001; ++i) {
+    v += (x*x -1.0)/10000.0;
+  }
+  return ( v );
 }
 
 /* Compute the factorial of x */

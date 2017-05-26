@@ -246,8 +246,12 @@ Time::Time(const std::string& name_in, bool start_in)
     , observation_idx_ (0)
 #endif
 {
+  #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+  observations_.reserve (1024);
+  #endif
+
   #if defined(TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS) && defined(TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS_PREALLOCATE)
-    observations_.reserve (DESCRIPTIVE_STATISTICS_MAX_NUM_TIMINGS);
+    //observations_.reserve (DESCRIPTIVE_STATISTICS_MAX_NUM_TIMINGS);
     observations_.resize (DESCRIPTIVE_STATISTICS_MAX_NUM_TIMINGS, 0.0);
   #endif
 
@@ -322,13 +326,10 @@ void Time::reset () {
   #endif
 }
 
+#ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
 void Time::computeDescriptiveStats(descriptive_stat_map_type& stat_map) const
 {
-  /*
-   * Use this function as a testing ground
-   *
-   */
-  #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+
     #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS_PREALLOCATE
       size_t observation_count = observation_idx_;
     #else
@@ -345,6 +346,7 @@ void Time::computeDescriptiveStats(descriptive_stat_map_type& stat_map) const
     stat_map["IQR"] = stat_map["IQR-excluded-median"];
     stat_map["numCalls"] = numCalls_;
 
+#ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS_DEBUG
     std::cout
         << "Min Value" << " = " << stat_map["Min Value"] << std::endl
         << "Max Value" << " = " << stat_map["Max Value"] << std::endl
@@ -357,14 +359,15 @@ void Time::computeDescriptiveStats(descriptive_stat_map_type& stat_map) const
         << "Total Time" << " = " << stat_map["Total Time"] << std::endl
         << "Num Observations" << " = " << stat_map["Num Observations"] << std::endl
         << "numCalls" << " = " << stat_map["numCalls"] << std::endl;
+#endif
 //        << "1st-excluded-median" << " = " << stat_map["1st-excluded-median"] << std::endl
 //        << "3rd-excluded-median" << " = " << stat_map["3rd-excluded-median"] << std::endl
 //        << "1st-included-median" << " = " << stat_map["1st-included-median"] << std::endl
 //        << "3rd-included-median" << " = " << stat_map["3rd-included-median"] << std::endl
 //        << "IQR-excluded-median" << " = " << stat_map["IQR-excluded-median"] << std::endl
 //        << "IQR-included-median" << " = " << stat_map["IQR-included-median"] << std::endl;
-  #endif
 }
+#endif
 
 void Time::disable () {
   enabled_ = false;

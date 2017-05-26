@@ -239,14 +239,85 @@ namespace Teuchos {
     }
   };
 
+#ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+
+  typedef Teuchos::Time::teuchos_descriptive_stats_mpi_struct_t ds_struct_t;
+
+  typedef struct mpi_min_max_mean_ds_struct {
+    ds_struct_t min;
+    ds_struct_t max;
+    ds_struct_t mean;
+    double mean_count;
+  } mpi_min_max_mean_ds_struct_t;
+
+  typedef std::map<std::string, mpi_min_max_mean_ds_struct_t> timer_map_t;
+
+  // reducer function for MPI reductions
+  static void MPI_Teuchos_DS_min_max_mean_reducer(void *in,
+                                           void *inout,
+                                           int *len,
+                                           MPI_Datatype *dtype) {
+    // We expect to get an MPI_MIN_MAX_MEAN_Teuchos_Descriptive_Stats_Struct, which
+    mpi_min_max_mean_ds_struct_t * input_structs = static_cast<mpi_min_max_mean_ds_struct_t *> (in);
+    mpi_min_max_mean_ds_struct_t * output_structs = static_cast<mpi_min_max_mean_ds_struct_t *> (inout);
+
+//    using std::endl;
+//    using std::cout;
+//    std::stringstream ss;
+//
+//    ss << "in = " << in << endl
+//       << "out = " << inout << endl
+//       << "len = " << *len << endl;
+//    cout << ss.str (); ss.str("");
+
+    for (int i=0; i < (*len); ++i) {
+//      ss << "i=" << i << endl;
+//      ss << "in: MIN"  << endl;
+//      Teuchos::Time::printDescriptiveStatsStruct(input_structs[i].min, ss);
+//      ss << "in: MEAN" << endl;
+//      Teuchos::Time::printDescriptiveStatsStruct(input_structs[i].mean, ss);
+//      ss << "in: MAX"  << endl;
+//      Teuchos::Time::printDescriptiveStatsStruct(input_structs[i].max, ss);
+//      cout << ss.str (); ss.str("");
+//      ss << "in: reduction_count = " << input_structs[i].mean_count << endl;
+//
+//      ss << "inout: MIN" << endl;
+//      Teuchos::Time::printDescriptiveStatsStruct(output_structs[i].min, ss);
+//      ss << "inout: MEAN" << endl;
+//      Teuchos::Time::printDescriptiveStatsStruct(output_structs[i].mean, ss);
+//      ss << "inout: MAX" << endl;
+//      Teuchos::Time::printDescriptiveStatsStruct(output_structs[i].max, ss);
+//      ss << "inout: reduction_count = " << output_structs[i].mean_count << endl;
+//      cout << ss.str (); ss.str("");
+
+      // compute the min, max, and mean
+      if (input_structs[i].min.numCalls > 0 && input_structs[i].min.median < output_structs[i].min.median)
+        output_structs[i].min = input_structs[i].min;
+
+      if (input_structs[i].max.numCalls > 0 && input_structs[i].max.median > output_structs[i].max.median)
+        output_structs[i].max = input_structs[i].max;
+
+      if (input_structs[i].mean.numCalls > 0) {
+        output_structs[i].mean.total_time += input_structs[i].mean.total_time;
+        output_structs[i].mean.median += input_structs[i].mean.median;
+        output_structs[i].mean.mean += input_structs[i].mean.mean;
+        output_structs[i].mean.q1 += input_structs[i].mean.q1;
+        output_structs[i].mean.q3 += input_structs[i].mean.q3;
+        output_structs[i].mean.stddev += input_structs[i].mean.stddev;
+        output_structs[i].mean.min_value += input_structs[i].mean.min_value;
+        output_structs[i].mean.max_value += input_structs[i].mean.max_value;
+        output_structs[i].mean.numCalls += input_structs[i].mean.numCalls;
+        output_structs[i].mean.num_observations += input_structs[i].mean.num_observations;
+        output_structs[i].mean_count += input_structs[i].mean_count;
+      }
+    }
+  }
+#else
+
   // Typedef used internally by TimeMonitor::summarize() and its
   // helper functions.  The map is keyed on timer label (a string).
   // Each value is a pair: (total number of seconds over all calls to
   // that timer, total number of calls to that timer).
-
-#ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
-  typedef std::map<std::string, Teuchos::Time::descriptive_stat_map_type > timer_map_t;
-#else
   typedef std::map<std::string, std::pair<double, int> > timer_map_t;
 #endif
 
@@ -320,7 +391,7 @@ namespace Teuchos {
     // \param name The timer's name.
 
   #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
-    std::pair<std::string, Teuchos::Time::descriptive_stat_map_type>
+    std::pair<std::string, mpi_min_max_mean_ds_struct_t>
   #else
     std::pair<std::string, std::pair<double, int> >
   #endif
@@ -328,7 +399,7 @@ namespace Teuchos {
     {
 
       #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
-        Teuchos::Time::descriptive_stat_map_type tmp_descriptive_stats;
+        mpi_min_max_mean_ds_struct_t tmp_descriptive_stats;
         return std::make_pair (name, tmp_descriptive_stats);
       #else
         return std::make_pair (name, std::make_pair (double(0), int(0)));
@@ -384,7 +455,15 @@ namespace Teuchos {
           if (loc == theLocalData.end()) {
             // Use loc as an insertion location hint.
             #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
-              theLocalData.insert (loc, make_pair (name, tmp_descriptive_stats));
+              mpi_min_max_mean_ds_struct_t this_min_max_mean_pack;
+              ds_struct_t this_struct = Teuchos::Time::getDescriptiveStatsStruct(tmp_descriptive_stats);
+
+              // pack the data.
+              this_min_max_mean_pack.min = this_struct;
+              this_min_max_mean_pack.max = this_struct;
+              this_min_max_mean_pack.mean = this_struct;
+              this_min_max_mean_pack.mean_count = 1.0;
+              theLocalData.insert (loc, make_pair (name, this_min_max_mean_pack));
             #else
               theLocalData.insert (loc, make_pair (name, make_pair (timing, numCalls)));
             #endif
@@ -421,10 +500,10 @@ namespace Teuchos {
            it != timerData.end(); ++it) {
 
         #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
-          typedef Teuchos::Time::descriptive_stat_map_type::const_iterator const_iterator;
-          const_iterator count_loc = it->second.find (Teuchos::Time::DS_numCalls_KEY);
-          int num_observations =  (count_loc == it->second.end()) ? 0 : static_cast<double> (count_loc->second);
-          if (num_observations > 0) {
+          // can use min/max/mean values in the struct, as these are all identical.
+          // The data structure is used for a min/max/mean reduction that retains
+          // the related data, but to begin, it is all initialized to the same value
+          if (it->second.min.numCalls > 0) {
               newTimerData[it->first] = it->second;
           }
         #else
@@ -717,6 +796,205 @@ namespace Teuchos {
       const int numTimers = static_cast<int> (globalTimerData.size());
       const int numProcs = comm->getSize();
 
+      #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+        MPI_Datatype MPI_Teuchos_DS_min_max_mean_structs;
+
+//        std::cout << "contiguous size " << Teuchos::Time::DS_NUM_STATS << " x 3 + 1" << std::endl
+//                  << "sizeof(mpi_min_max_mean_ds_struct_t) = " << sizeof(mpi_min_max_mean_ds_struct_t)
+//                  << ", by sizeof(double) = " << sizeof(mpi_min_max_mean_ds_struct_t) / sizeof(double) << std::endl;
+
+        MPI_Type_contiguous(Teuchos::Time::DS_NUM_STATS*3 + 1, MPI_DOUBLE, &MPI_Teuchos_DS_min_max_mean_structs);
+        MPI_Type_commit(&MPI_Teuchos_DS_min_max_mean_structs);
+
+        MPI_Op MPI_Teuchos_DS_min_max_mean_op;
+        MPI_Op_create( MPI_Teuchos_DS_min_max_mean_reducer, 1, &MPI_Teuchos_DS_min_max_mean_op);
+
+        std::vector<mpi_min_max_mean_ds_struct_t> min_max_mean_results;
+        for (timer_map_t::const_iterator it = globalTimerData.begin();
+             it != globalTimerData.end(); ++it) {
+
+          min_max_mean_results.push_back(it->second);
+        }
+
+        MPI_Allreduce(MPI_IN_PLACE,
+                    min_max_mean_results.data (),
+                    min_max_mean_results.size (),
+                    MPI_Teuchos_DS_min_max_mean_structs,
+                    MPI_Teuchos_DS_min_max_mean_op,
+                    MPI_COMM_WORLD );
+
+
+          #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS_DEBUG
+            using std::endl;
+            using std::cout;
+            using std::stringstream;
+
+            stringstream ss;
+          #endif
+
+
+          int i = 0;
+          for (timer_map_t::const_iterator it = globalTimerData.begin();
+               it != globalTimerData.end(); ++it, ++i) {
+            #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS_DEBUG
+              ss << "==============================================" << endl
+                 << "Timer: " << it->first << endl
+                 << "     reduction_count = " << min_max_mean_results[i].mean_count << endl;
+            #endif
+//
+//            ss << "  Min:" << endl;
+//            Teuchos::Time::printDescriptiveStatsStruct(min_max_mean_results[i].min, ss);
+//
+//            ss << "  Max:" << endl;
+//            Teuchos::Time::printDescriptiveStatsStruct(min_max_mean_results[i].max, ss);
+
+            const double mean_participants = min_max_mean_results[i].mean_count;
+            min_max_mean_results[i].mean.total_time /= mean_participants;
+            min_max_mean_results[i].mean.median /= mean_participants;
+            min_max_mean_results[i].mean.mean /= mean_participants;
+            min_max_mean_results[i].mean.q1 /= mean_participants;
+            min_max_mean_results[i].mean.q3 /= mean_participants;
+            min_max_mean_results[i].mean.max_value /= mean_participants;
+            min_max_mean_results[i].mean.min_value /= mean_participants;
+            min_max_mean_results[i].mean.stddev /= mean_participants;
+
+            // for now, don't scale these
+
+            //min_max_mean_results[i].mean.num_observations /= mean_participants;
+            //min_max_mean_results[i].mean.numCalls /= mean_participants;
+            //ss << "  Mean:" << endl;
+            //Teuchos::Time::printDescriptiveStatsStruct(min_max_mean_results[i].mean, ss);
+
+          }
+          #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS_DEBUG
+            cout << ss.str ();
+            MPI_Barrier(MPI_COMM_WORLD);
+          #endif
+          // Reformat the data into the map of statistics.  Be sure that
+          // each value (the std::vector of (timing, call count) pairs,
+          // each entry of which is a different statistic) preserves the
+          // order of statNames.
+          statNames.resize (4);
+          statNames[0] = "MinOverProcs";
+          statNames[1] = "MeanOverProcs";
+          statNames[2] = "MaxOverProcs";
+          statNames[3] = "MeanOverCallCounts";
+
+          /*
+              double total_time;
+              double median;
+              double mean;
+              double q1;
+              double q3;
+              double stddev;
+              double min_value;
+              double max_value;
+           */
+          statNames.resize (8*3);
+          statNames[0] = "MinProc:Total Time";
+          statNames[1] = "MinProc:Q1";
+          statNames[2] = "MinProc:Q2";
+          statNames[3] = "MinProc:Q3";
+          statNames[4] = "MinProc:Min";
+          statNames[5] = "MinProc:Max";
+          statNames[6] = "MinProc:Mean";
+          statNames[7] = "MinProc:StdDev";
+
+          statNames[8]  = "MaxProc:Total Time";
+          statNames[9] = "MaxProc:Q1";
+          statNames[10]  = "MaxProc:Q2";
+          statNames[11] = "MaxProc:Q3";
+          statNames[12] = "MaxProc:Min";
+          statNames[13] = "MaxProc:Max";
+          statNames[14] = "MaxProc:Mean";
+          statNames[15] = "MaxProc:StdDev";
+
+          statNames[16] = "AvgOverProcs:Total Time";
+          statNames[17] = "AvgOverProcs:Q1";
+          statNames[18] = "AvgOverProcs:Q2";
+          statNames[19] = "AvgOverProcs:Q3";
+          statNames[20] = "AvgOverProcs:Min";
+          statNames[21] = "AvgOverProcs:Max";
+          statNames[22] = "AvgOverProcs:Mean";
+          statNames[23] = "AvgOverProcs:StdDev";
+
+//          statNames[0] = "MinProc:Total Time (agg)";
+//          statNames[1] = "MinProc:Median Time";
+//          statNames[2] = "MinProc:1st Quartile";
+//          statNames[3] = "MinProc:3rd Quartile";
+//          statNames[4] = "MinProc:Min Time";
+//          statNames[5] = "MinProc:Max Time";
+//          statNames[6] = "MinProc:Mean";
+//          statNames[7] = "MinProc:StdDev";
+//
+//          statNames[8]  = "MaxProc:Total Time (agg)";
+//          statNames[9]  = "MaxProc:Median Time";
+//          statNames[10] = "MaxProc:1st Quartile";
+//          statNames[11] = "MaxProc:3rd Quartile";
+//          statNames[12] = "MaxProc:Min Time";
+//          statNames[13] = "MaxProc:Max Time";
+//          statNames[14] = "MaxProc:Mean";
+//          statNames[15] = "MaxProc:StdDev";
+//
+//          statNames[16] = "AvgOverProcs:Total Time (agg)";
+//          statNames[17] = "AvgOverProcs:Median Time";
+//          statNames[18] = "AvgOverProcs:1st Quartile";
+//          statNames[19] = "AvgOverProcs:3rd Quartile";
+//          statNames[20] = "AvgOverProcs:Min Time";
+//          statNames[21] = "AvgOverProcs:Max Time";
+//          statNames[22] = "AvgOverProcs:Mean";
+//          statNames[23] = "AvgOverProcs:StdDev";
+
+          stat_map_type::iterator statIter = statData.end();
+          timer_map_t::const_iterator it = globalTimerData.begin();
+          for (int k = 0; it != globalTimerData.end(); ++k, ++it) {
+            std::vector<std::pair<double, double> > curData (8*3);
+//            curData[0] = std::make_pair (min_max_mean_results[k].min.total_time, min_max_mean_results[k].min.numCalls);
+//            curData[1] = std::make_pair (min_max_mean_results[k].mean.total_time, min_max_mean_results[k].mean_count);
+//            curData[2] = std::make_pair (min_max_mean_results[k].max.total_time, min_max_mean_results[k].max.numCalls);
+//            curData[3] = std::make_pair (min_max_mean_results[k].mean.total_time / min_max_mean_results[k].mean.numCalls,
+//                                         min_max_mean_results[k].mean.numCalls);
+            curData[0] = std::make_pair (min_max_mean_results[k].min.total_time, min_max_mean_results[k].min.numCalls);
+            curData[1] = std::make_pair (min_max_mean_results[k].min.q1, min_max_mean_results[k].min.numCalls);
+            curData[2] = std::make_pair (min_max_mean_results[k].min.median, min_max_mean_results[k].min.numCalls);
+            curData[3] = std::make_pair (min_max_mean_results[k].min.q3, min_max_mean_results[k].min.numCalls);
+            curData[4] = std::make_pair (min_max_mean_results[k].min.min_value, min_max_mean_results[k].min.numCalls);
+            curData[5] = std::make_pair (min_max_mean_results[k].min.max_value, min_max_mean_results[k].min.numCalls);
+            curData[6] = std::make_pair (min_max_mean_results[k].min.mean, min_max_mean_results[k].min.numCalls);
+            curData[7] = std::make_pair (min_max_mean_results[k].min.stddev, min_max_mean_results[k].min.numCalls);
+
+            curData[8] = std::make_pair (min_max_mean_results[k].max.total_time, min_max_mean_results[k].max.numCalls);
+            curData[9] = std::make_pair (min_max_mean_results[k].max.q1, min_max_mean_results[k].max.numCalls);
+            curData[10] = std::make_pair (min_max_mean_results[k].max.median, min_max_mean_results[k].max.numCalls);
+            curData[11] = std::make_pair (min_max_mean_results[k].max.q3, min_max_mean_results[k].max.numCalls);
+            curData[12] = std::make_pair (min_max_mean_results[k].max.min_value, min_max_mean_results[k].max.numCalls);
+            curData[13] = std::make_pair (min_max_mean_results[k].max.max_value, min_max_mean_results[k].max.numCalls);
+            curData[14] = std::make_pair (min_max_mean_results[k].max.mean, min_max_mean_results[k].max.numCalls);
+            curData[15] = std::make_pair (min_max_mean_results[k].max.stddev, min_max_mean_results[k].max.numCalls);
+
+            curData[16] = std::make_pair (min_max_mean_results[k].mean.total_time, min_max_mean_results[k].mean.numCalls);
+            curData[17] = std::make_pair (min_max_mean_results[k].mean.q1, min_max_mean_results[k].mean.numCalls);
+            curData[18] = std::make_pair (min_max_mean_results[k].mean.median, min_max_mean_results[k].mean.numCalls);
+            curData[19] = std::make_pair (min_max_mean_results[k].mean.q3, min_max_mean_results[k].mean.numCalls);
+            curData[20] = std::make_pair (min_max_mean_results[k].mean.min_value, min_max_mean_results[k].mean.numCalls);
+            curData[21] = std::make_pair (min_max_mean_results[k].mean.max_value, min_max_mean_results[k].mean.numCalls);
+            curData[22] = std::make_pair (min_max_mean_results[k].mean.mean, min_max_mean_results[k].mean.numCalls);
+            curData[23] = std::make_pair (min_max_mean_results[k].mean.stddev, min_max_mean_results[k].mean.numCalls);
+
+            //cout << "pairs made" << endl;
+            // statIter gives an insertion location hint that makes each
+            // insertion O(1), since we remember the location of the last
+            // insertion.
+            statIter = statData.insert (statIter, std::make_pair (it->first, curData));
+          }
+        //}
+
+        MPI_Type_free (&MPI_Teuchos_DS_min_max_mean_structs);
+        MPI_Op_free (&MPI_Teuchos_DS_min_max_mean_op);
+
+        //std::swap(statNames, statNames_);
+      #else
+
       // Extract pre-reduction timings and call counts into a
       // sequential array.  This array will be in the same order as
       // the global timer names are in the map.
@@ -724,17 +1002,7 @@ namespace Teuchos {
       timingsAndCallCounts.reserve (numTimers);
       for (timer_map_t::const_iterator it = globalTimerData.begin();
            it != globalTimerData.end(); ++it) {
-        #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
-          typedef Teuchos::Time::descriptive_stat_map_type::const_iterator const_iterator;
-          const_iterator total_loc = it->second.find (Teuchos::Time::DS_TOTAL_TIME_KEY);
-          const_iterator count_loc = it->second.find (Teuchos::Time::DS_numCalls_KEY);
-          double total_time =  (total_loc == it->second.end()) ? 0.0 : total_loc->second;
-          int num_observations =  (count_loc == it->second.end()) ? 0 : static_cast<double> (count_loc->second);
-
-          timingsAndCallCounts.push_back (std::pair<double, int> (total_time, num_observations));
-        #else
           timingsAndCallCounts.push_back (it->second);
-        #endif
       }
 
       // For each timer name, compute the min timing and its
@@ -859,6 +1127,7 @@ namespace Teuchos {
         // insertion.
         statIter = statData.insert (statIter, std::make_pair (it->first, curData));
       }
+      #endif
     }
 
 
@@ -1028,14 +1297,8 @@ namespace Teuchos {
       for (timer_map_t::const_iterator it = localTimerData.begin();
            it != localTimerData.end(); ++it) {
         #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
-          typedef Teuchos::Time::descriptive_stat_map_type::const_iterator const_iterator;
-          const_iterator total_loc = it->second.find (Teuchos::Time::DS_TOTAL_TIME_KEY);
-          const_iterator count_loc = it->second.find (Teuchos::Time::DS_numCalls_KEY);
-          double total_time =  (total_loc == it->second.end()) ? 0.0 : total_loc->second;
-          int num_observations =  (count_loc == it->second.end()) ? 0 : static_cast<double> (count_loc->second);
-
-          localTimings.push_back (total_time);
-          localNumCalls.push_back (num_observations);
+          localTimings.push_back (it->second.min.total_time);
+          localNumCalls.push_back (it->second.min.numCalls);
         #else
           localTimings.push_back (it->second.first);
           localNumCalls.push_back (static_cast<double> (it->second.second));
@@ -1060,13 +1323,8 @@ namespace Teuchos {
 
           #ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
             typedef Teuchos::Time::descriptive_stat_map_type::const_iterator const_iterator;
-            const_iterator total_loc = it->second.find (Teuchos::Time::DS_TOTAL_TIME_KEY);
-            const_iterator count_loc = it->second.find (Teuchos::Time::DS_numCalls_KEY);
-            double total_time =  (total_loc == it->second.end()) ? 0.0 : total_loc->second;
-            int num_observations =  (count_loc == it->second.end()) ? 0 : static_cast<double> (count_loc->second);
-
-            globalTimings.push_back (total_time);
-            globalNumCalls.push_back (num_observations);
+            globalTimings.push_back (it->second.min.total_time);
+            globalNumCalls.push_back (it->second.min.numCalls);
           #else
             globalTimings.push_back (it->second.first);
             globalNumCalls.push_back (static_cast<double> (it->second.second));
@@ -1098,9 +1356,21 @@ namespace Teuchos {
           const std::string& statisticName = statNames[statInd];
           const std::string titleString = statisticName;
           titles.append (titleString);
-          TableColumn timeAndCalls (statTimings, statCallCounts, precision, true);
-          tableColumns.append (timeAndCalls);
-          columnWidths.append (format().computeRequiredColumnWidth (titles.back(), timeAndCalls));
+
+#ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+          if (statInd % 8 == 0) {
+#endif
+            TableColumn timeAndCalls (statTimings, statCallCounts, precision, true);
+            tableColumns.append (timeAndCalls);
+            columnWidths.append (format().computeRequiredColumnWidth (titles.back(), timeAndCalls));
+
+#ifdef TEUCHOS_TIMEMONITOR_USE_DESCRIPTIVE_STATISTICS
+          } else {
+            TableColumn timeAndCalls (statTimings, precision);
+            tableColumns.append (timeAndCalls);
+            columnWidths.append (format().computeRequiredColumnWidth (titles.back(), timeAndCalls));
+          }
+#endif
         }
       }
     }
