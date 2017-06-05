@@ -1035,11 +1035,18 @@ const LinearOp explicitMultiply(const LinearOp & opl,const LinearOp & opm,const 
       RCP<Thyra::LinearOpBase<ST> > explicitOp = rcp(new Thyra::TpetraLinearOp<ST,LO,GO,NT>());
       RCP<Thyra::TpetraLinearOp<ST,LO,GO,NT> > tExplicitOp = rcp_dynamic_cast<Thyra::TpetraLinearOp<ST,LO,GO,NT> >(explicitOp);
 
+      std::stringstream ss;
+      ss  << "Teko::explicitMultiply:" << tCrsOpl->getObjectLabel () << "_x_" << tCrsOpm->getObjectLabel ();
+      std::string label_Opl_Opm_ss = ss.str ();
+      ss.str("");
+      ss  << "Teko::explicitMultiply:" << "result" << "_x_" << tCrsOpr->getObjectLabel ();
+      std::string label_Oplm_Opr_ss = ss.str ();
+
       // Do explicit matrix-matrix multiply
       RCP<Tpetra::CrsMatrix<ST,LO,GO,NT> > tCrsOplm = Tpetra::createCrsMatrix<ST,LO,GO,NT>(tCrsOpl->getRowMap());
       RCP<Tpetra::CrsMatrix<ST,LO,GO,NT> > explicitCrsOp = Tpetra::createCrsMatrix<ST,LO,GO,NT>(tCrsOpl->getRowMap());
-      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOpl,transpl,*tCrsOpm,transpm,*tCrsOplm); 
-      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOplm,false,*tCrsOpr,transpr,*explicitCrsOp); 
+      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOpl,transpl,*tCrsOpm,transpm,*tCrsOplm, true, label_Opl_Opm_ss ); 
+      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOplm,false,*tCrsOpr,transpr,*explicitCrsOp, true, label_Oplm_Opr_ss); 
       explicitCrsOp->resumeFill();
       explicitCrsOp->scale(scalarl*scalarm*scalarr);
       explicitCrsOp->fillComplete(tCrsOpr->getDomainMap(),tCrsOpl->getRangeMap());
@@ -1070,8 +1077,13 @@ const LinearOp explicitMultiply(const LinearOp & opl,const LinearOp & opm,const 
       RCP<Thyra::TpetraLinearOp<ST,LO,GO,NT> > tExplicitOp = rcp_dynamic_cast<Thyra::TpetraLinearOp<ST,LO,GO,NT> >(explicitOp);
 
       // Do explicit matrix-matrix multiply
+
+      std::stringstream ss;
+      ss  << "Teko::explicitMultiply:Diagonal:" << tCrsOplm->getObjectLabel () << "_x_" << tCrsOpr->getObjectLabel ();
+      std::string label_Oplm_Opr_ss = ss.str ();
+
       RCP<Tpetra::CrsMatrix<ST,LO,GO,NT> > explicitCrsOp = Tpetra::createCrsMatrix<ST,LO,GO,NT>(tCrsOpl->getRowMap());
-      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOplm,false,*tCrsOpr,transpr,*explicitCrsOp); 
+      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOplm,false,*tCrsOpr,transpr,*explicitCrsOp, true, label_Oplm_Opr_ss); 
       explicitCrsOp->resumeFill();
       explicitCrsOp->scale(scalarl*scalarr);
       explicitCrsOp->fillComplete(tCrsOpr->getDomainMap(),tCrsOpl->getRangeMap());
@@ -1137,11 +1149,18 @@ const ModifiableLinearOp explicitMultiply(const LinearOp & opl,const LinearOp & 
       RCP<Thyra::LinearOpBase<ST> > explicitOp = rcp(new Thyra::TpetraLinearOp<ST,LO,GO,NT>());
       RCP<Thyra::TpetraLinearOp<ST,LO,GO,NT> > tExplicitOp = rcp_dynamic_cast<Thyra::TpetraLinearOp<ST,LO,GO,NT> >(explicitOp);
 
+      std::stringstream ss;
+      ss  << "Teko:explicitMultiply:Modifiable" << tCrsOpl->getObjectLabel () << "_x_" << tCrsOpm->getObjectLabel ();
+      std::string label_Opl_Opm_ss = ss.str ();
+      ss.str("");
+      ss  << "Teko::explicitMultiply:Modifiable" << "result" << "_x_" << tCrsOpr->getObjectLabel ();
+      std::string label_Oplm_Opr_ss = ss.str ();
+
       // Do explicit matrix-matrix multiply
       RCP<Tpetra::CrsMatrix<ST,LO,GO,NT> > tCrsOplm = Tpetra::createCrsMatrix<ST,LO,GO,NT>(tCrsOpl->getRowMap());
       RCP<Tpetra::CrsMatrix<ST,LO,GO,NT> > explicitCrsOp = Tpetra::createCrsMatrix<ST,LO,GO,NT>(tCrsOpl->getRowMap());
-      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOpl,transpl,*tCrsOpm,transpm,*tCrsOplm); 
-      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOplm,false,*tCrsOpr,transpr,*explicitCrsOp); 
+      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOpl,transpl,*tCrsOpm,transpm,*tCrsOplm, true, label_Opl_Opm_ss); 
+      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOplm,false,*tCrsOpr,transpr,*explicitCrsOp, true, label_Oplm_Opr_ss); 
       explicitCrsOp->resumeFill();
       explicitCrsOp->scale(scalarl*scalarm*scalarr);
       explicitCrsOp->fillComplete(tCrsOpr->getDomainMap(),tCrsOpl->getRangeMap());
@@ -1171,9 +1190,13 @@ const ModifiableLinearOp explicitMultiply(const LinearOp & opl,const LinearOp & 
       RCP<Thyra::LinearOpBase<ST> > explicitOp = rcp(new Thyra::TpetraLinearOp<ST,LO,GO,NT>());
       RCP<Thyra::TpetraLinearOp<ST,LO,GO,NT> > tExplicitOp = rcp_dynamic_cast<Thyra::TpetraLinearOp<ST,LO,GO,NT> >(explicitOp);
 
+      std::stringstream ss;
+      ss  << "Teko::explicitMultiply:Modifiable:Diagonal:" << tCrsOplm->getObjectLabel () << "_x_" << tCrsOpr->getObjectLabel ();
+      std::string label_Oplm_Opr_ss = ss.str ();
+
       // Do explicit matrix-matrix multiply
       RCP<Tpetra::CrsMatrix<ST,LO,GO,NT> > explicitCrsOp = Tpetra::createCrsMatrix<ST,LO,GO,NT>(tCrsOpl->getRowMap());
-      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOplm,false,*tCrsOpr,transpr,*explicitCrsOp); 
+      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOplm,false,*tCrsOpr,transpr,*explicitCrsOp, true, label_Oplm_Opr_ss); 
       explicitCrsOp->resumeFill();
       explicitCrsOp->scale(scalarl*scalarr);
       explicitCrsOp->fillComplete(tCrsOpr->getDomainMap(),tCrsOpl->getRangeMap());
@@ -1239,9 +1262,13 @@ const LinearOp explicitMultiply(const LinearOp & opl,const LinearOp & opr)
       RCP<Thyra::LinearOpBase<ST> > explicitOp = rcp(new Thyra::TpetraLinearOp<ST,LO,GO,NT>());
       RCP<Thyra::TpetraLinearOp<ST,LO,GO,NT> > tExplicitOp = rcp_dynamic_cast<Thyra::TpetraLinearOp<ST,LO,GO,NT> >(explicitOp);
 
+      std::stringstream ss;
+      ss  << "Teko:explicitMultiply:2ops" << tCrsOpl->getObjectLabel () << "_x_" << tCrsOpr->getObjectLabel ();
+      std::string label_Opl_Opr_ss = ss.str ();
+
       // Do explicit matrix-matrix multiply
       RCP<Tpetra::CrsMatrix<ST,LO,GO,NT> > explicitCrsOp = Tpetra::createCrsMatrix<ST,LO,GO,NT>(tCrsOpl->getRowMap());
-      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOpl,transpl,*tCrsOpr,transpr,*explicitCrsOp);
+      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOpl,transpl,*tCrsOpr,transpr,*explicitCrsOp, true, label_Opl_Opr_ss);
       explicitCrsOp->resumeFill();
       explicitCrsOp->scale(scalarl*scalarr);
       explicitCrsOp->fillComplete(tCrsOpr->getDomainMap(),tCrsOpl->getRangeMap());
@@ -1349,9 +1376,13 @@ const ModifiableLinearOp explicitMultiply(const LinearOp & opl,const LinearOp & 
          explicitOp = rcp(new Thyra::TpetraLinearOp<ST,LO,GO,NT>());
       RCP<Thyra::TpetraLinearOp<ST,LO,GO,NT> > tExplicitOp = rcp_dynamic_cast<Thyra::TpetraLinearOp<ST,LO,GO,NT> >(explicitOp);
 
+      std::stringstream ss;
+      ss  << "Teko:explicitMultiply:2ops:Modifiable" << tCrsOpl->getObjectLabel () << "_x_" << tCrsOpr->getObjectLabel ();
+      std::string label_Opl_Opr_ss = ss.str ();
+
       // Do explicit matrix-matrix multiply
       RCP<Tpetra::CrsMatrix<ST,LO,GO,NT> > explicitCrsOp = Tpetra::createCrsMatrix<ST,LO,GO,NT>(tCrsOpl->getRowMap());
-      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOpl,transpl,*tCrsOpr,transpr,*explicitCrsOp); 
+      Tpetra::MatrixMatrix::Multiply<ST,LO,GO,NT>(*tCrsOpl,transpl,*tCrsOpr,transpr,*explicitCrsOp, true, label_Opl_Opr_ss); 
       explicitCrsOp->resumeFill();
       explicitCrsOp->scale(scalarl*scalarr);
       explicitCrsOp->fillComplete(tCrsOpr->getDomainMap(),tCrsOpl->getRangeMap());
