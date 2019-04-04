@@ -44,6 +44,9 @@
 #include "Teuchos_VerboseObjectParameterListHelpers.hpp"
 #include <numeric>
 
+
+extern bool USE_JJE_THREAD_MULTIPLE;
+
 namespace { // (anonymous)
 
   Teuchos::RCP<Teuchos::FancyOStream>
@@ -557,6 +560,31 @@ namespace Tpetra {
       *out_ << os.str ();
     }
 
+ if (indicesTo_.empty() && requests_.size() == 0 && ::USE_JJE_THREAD_MULTIPLE) //&& sendType_ == Details::DISTRIBUTOR_ISEND) {
+ { 
+  #pragma omp parallel
+   {
+     if (mpi_isend_requests_.size () > 0) {
+       #pragma omp for schedule(static,1) nowait
+       for (size_t  i =0; i < mpi_isend_requests_.size(); ++i)
+       {
+         if (mpi_isend_requests_[i] != MPI_REQUEST_NULL)
+           MPI_Wait(&(mpi_isend_requests_[i]), MPI_STATUS_IGNORE);
+       }
+     }
+
+     if (mpi_irecv_requests_.size () > 0) {
+       #pragma omp for schedule(static,1) nowait
+       for (size_t  i =0; i < mpi_irecv_requests_.size(); ++i)
+       {
+         if (mpi_irecv_requests_[i] != MPI_REQUEST_NULL)
+           MPI_Wait(&(mpi_irecv_requests_[i]), MPI_STATUS_IGNORE);
+       }
+     }
+   } // end parallel
+
+ } else {
+
     if (requests_.size() > 0) {
       waitAll (*comm_, requests_());
 
@@ -590,6 +618,7 @@ namespace Tpetra {
         "point.  Please report this bug to the Tpetra developers.");
     }
 #endif // HAVE_TEUCHOS_DEBUG
+ } // guard jje
 
     if (verbose_) {
       std::ostringstream os;

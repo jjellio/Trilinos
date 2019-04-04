@@ -55,8 +55,9 @@
 
 
 
-namespace Teuchos {
+bool USE_JJE_THREAD_MULTIPLE = false;
 
+namespace Teuchos {
 
 bool GlobalMPISession::haveMPIState_ = false;
 bool GlobalMPISession::mpiIsFinalized_ = false;
@@ -96,7 +97,28 @@ GlobalMPISession::GlobalMPISession( int* argc, char*** argv, std::ostream *out )
   }
 
   // Initialize MPI
-  mpierr = ::MPI_Init(argc, (char ***) argv);
+  const char * t = std::getenv ("USE_JJE_THREAD_MULTIPLE");
+  const std::string useMPI_Thread_multiple_str = t == NULL ? "" : t;
+  const bool useMPI_Thread_multiple = (useMPI_Thread_multiple_str == "YES") ? true : false;
+
+  if ( useMPI_Thread_multiple)
+  {
+    int provided_mpi_level = -1;
+    ::USE_JJE_THREAD_MULTIPLE=true;
+    mpierr = ::MPI_Init_thread(argc, argv, MPI_THREAD_MULTIPLE, &provided_mpi_level);
+    if (provided_mpi_level != MPI_THREAD_MULTIPLE) {
+      if (out) {
+        *out << "GlobalMPISession(): Error, MPI_Init() cannot provide THREAD_MULTIPLE! Provided is="
+             << provided_mpi_level << ", calling std::terminate()!\n"
+             << std::flush;
+      }
+      std::terminate();
+    } else {
+      if (out) *out << "GlobalMPISession(): Using THREAD_MULTIPLE\n";
+    }
+  } else {
+    mpierr = ::MPI_Init(argc, (char ***) argv);
+  }
   if (mpierr != 0) {
     if (out) {
       *out << "GlobalMPISession(): Error, MPI_Init() returned error code="

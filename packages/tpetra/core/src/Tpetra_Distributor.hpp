@@ -58,9 +58,6 @@
 // #  define TPETRA_DISTRIBUTOR_TIMERS 1
 // #endif // TPETRA_DISTRIBUTOR_TIMERS
 
-#ifdef TPETRA_DISTRIBUTOR_TIMERS
-#  undef TPETRA_DISTRIBUTOR_TIMERS
-#endif // TPETRA_DISTRIBUTOR_TIMERS
 
 #include "KokkosCompat_View.hpp"
 #include "Kokkos_Core.hpp"
@@ -68,6 +65,13 @@
 #include <memory>
 #include <sstream>
 #include <type_traits>
+
+#ifdef HAVE_TPETRACORE_MPI
+  #include "Tpetra_Details_extractMpiCommFromTeuchos.hpp"
+  #include "Tpetra_Details_MpiTypeTraits.hpp"
+#endif // HAVE_TPETRACORE_MPI
+
+extern bool USE_JJE_THREAD_MULTIPLE;
 
 namespace Tpetra {
 
@@ -943,6 +947,8 @@ namespace Tpetra {
     ///   receive and send requests.
     Teuchos::Array<Teuchos::RCP<Teuchos::CommRequest<int> > > requests_;
 
+    Teuchos::Array<MPI_Request> mpi_irecv_requests_;
+    Teuchos::Array<MPI_Request> mpi_isend_requests_;
     /// \brief The reverse distributor.
     ///
     /// This is created on demand in getReverse() and cached for
@@ -1165,7 +1171,10 @@ namespace Tpetra {
     std::unique_ptr<std::string> prefix;
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank << ": Distributor::doPosts(3-arg, ArrayRCP): ";
+      os << __FILE__ << ":"
+         << std::to_string(__LINE__) << ":"
+         << __func__ 
+         << ": Proc " << myRank << ": Distributor::doPosts(3-arg, ArrayRCP): ";
       prefix = std::unique_ptr<std::string> (new std::string (os.str ()));
       os << endl;
       *out_ << os.str ();
@@ -1605,7 +1614,7 @@ namespace Tpetra {
 #endif // HAVE_TEUCHOS_DEBUG
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myProcID << ": doPosts(4 args, Teuchos::ArrayRCP, "
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID << ": doPosts(4 args, Teuchos::ArrayRCP, "
          << (indicesTo_.empty () ? "fast" : "slow") << ")" << endl;
       *out_ << os.str ();
     }
@@ -1715,7 +1724,7 @@ namespace Tpetra {
     if (indicesTo_.empty()) {
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myProcID
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID
            << ": doPosts(4 args, Teuchos::ArrayRCP, fast): posting sends" << endl;
         *out_ << os.str ();
       }
@@ -1773,7 +1782,7 @@ namespace Tpetra {
       }
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myProcID
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID
            << ": doPosts(4 args, Teuchos::ArrayRCP, fast) done" << endl;
         *out_ << os.str ();
       }
@@ -1781,7 +1790,7 @@ namespace Tpetra {
     else { // data are not blocked by proc, use send buffer
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myProcID
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID
            << ": doPosts(4 args, Teuchos::ArrayRCP, slow): posting sends" << endl;
         *out_ << os.str ();
       }
@@ -1864,7 +1873,7 @@ namespace Tpetra {
       }
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myProcID
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID
            << ": doPosts(4 args, Teuchos::ArrayRCP, slow) done" << endl;
         *out_ << os.str ();
       }
@@ -2000,7 +2009,7 @@ namespace Tpetra {
       tab0 = rcp (new Teuchos::OSTab (out_));
       const int myRank = comm_->getRank ();
       std::ostringstream os;
-      os << "Proc " << myRank
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
          << ": Distributor::doPostsAndWaits(3 args, Kokkos): "
          << "{sendType: " << DistributorSendTypeEnumToString (sendType_)
          << ", barrierBetween: " << barrierBetween_ << "}" << endl;
@@ -2017,7 +2026,7 @@ namespace Tpetra {
     if (verbose_) {
       const int myRank = comm_->getRank ();
       std::ostringstream os;
-      os << "Proc " << myRank
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
          << ": Distributor::doPostsAndWaits: Call doPosts" << endl;
       *out_ << os.str ();
     }
@@ -2025,7 +2034,7 @@ namespace Tpetra {
     if (verbose_) {
       const int myRank = comm_->getRank ();
       std::ostringstream os;
-      os << "Proc " << myRank
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
          << ": Distributor::doPostsAndWaits: Call doWaits" << endl;
       *out_ << os.str ();
     }
@@ -2099,7 +2108,7 @@ namespace Tpetra {
     Teuchos::OSTab tab0 (out_);
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
          << ": Distributor::doPosts(3 args, Kokkos)" << endl;
       *out_ << os.str ();
     }
@@ -2124,7 +2133,7 @@ namespace Tpetra {
 
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myRank << ": doPosts: totalNumImportPackets = " <<
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts: totalNumImportPackets = " <<
           totalNumImportPackets << " = " << totalReceiveLength_ << " * " <<
           numPackets << "; imports.extent(0) = " << imports.extent (0)
            << endl;
@@ -2197,11 +2206,130 @@ namespace Tpetra {
 
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank << ": doPosts(3 args, Kokkos, "
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts(3 args, Kokkos, "
          << (indicesTo_.empty () ? "fast" : "slow") << "): Post receives"
          << endl;
       *out_ << os.str ();
     }
+
+ if (indicesTo_.empty() && ::USE_JJE_THREAD_MULTIPLE) // && sendType == Details::DISTRIBUTOR_ISEND)
+ {
+    const size_type actualNumReceives_jje = as<size_type> (numReceives_) +
+                                            as<size_type> (selfMessage_ ? 1 : 0);
+    const size_type actualNumSends_jje = as<size_type> (numSends_) +
+                                         as<size_type> (selfMessage_ ? 1 : 0);
+    // we need to track the offset so we can use it in the send kernel
+    size_t selfReceiveOffset_jje = 0;
+    // create a buffer for a thread parallel MPI call
+    std::vector<size_t> mpi_irecv_buffer_offsets;
+
+    // setup the sends
+    if (actualNumSends_jje > 0) {
+      mpi_isend_requests_.reserve(actualNumSends_jje);
+      mpi_isend_requests_.resize(actualNumSends_jje);
+    }
+
+    // handle the receives
+    if (actualNumReceives_jje > 0 ) {
+      size_t curBufferOffset_jje = 0;
+      mpi_irecv_requests_.reserve(actualNumReceives_jje);
+      mpi_irecv_requests_.resize(actualNumReceives_jje);
+      mpi_irecv_buffer_offsets.reserve(actualNumReceives_jje);
+      mpi_irecv_buffer_offsets.resize(actualNumReceives_jje);
+
+      for (size_type i = 0; i < actualNumReceives_jje; ++i)
+      {
+
+        if (verbose_) {
+          std::ostringstream os;
+          os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts_jje(3 args, Kokkos, "
+             << (indicesTo_.empty () ? "fast" : "slow") << "): "
+             << "Post irecv: {source: " << procsFrom_[i]
+             << ", tag: " << tag << ", numPackets = " << numPackets << "}\n";
+          *out_ << os.str ();
+        }
+
+        const size_t curBufLen = lengthsFrom_[i] * numPackets;
+        if (procsFrom_[i] == myRank) {
+          // Receiving from myself
+          selfReceiveOffset_jje = curBufferOffset_jje; // Remember the self-recv offset
+        }
+        // initialize the requests
+        mpi_irecv_requests_[i] = MPI_REQUEST_NULL;
+        // record where this request should store data
+        mpi_irecv_buffer_offsets[i] = curBufferOffset_jje;
+        // update the offset for the next request
+        curBufferOffset_jje += curBufLen;
+      }
+    } // end if actualNumReceives_jje > 0
+
+
+    // hacky, because Teuchos does not support using raw MPI_Requests
+    MPI_Comm rawComm = Details::extractMpiCommFromTeuchos (*comm_);
+
+    #pragma omp parallel
+    {
+      // post a bunch of receives
+      #pragma omp for schedule(static,1) nowait
+      for (size_type i = 0; i < actualNumReceives_jje; ++i)
+      {
+        const size_t curBufLen = lengthsFrom_[i] * numPackets;
+        if (procsFrom_[i] != myRank) {
+          // grab a subview of for this request 
+          imports_view_type recvBuf = subview_offset (imports,
+                                                      mpi_irecv_buffer_offsets[i],
+                                                      curBufLen);
+          // post the receive
+          const auto rc  = MPI_Irecv(recvBuf.data(),
+                                     sizeof(typename ExpView::non_const_value_type)*curBufLen,
+                                     MPI_BYTE,
+                                     procsFrom_[i],
+                                     tag,
+                                     rawComm,
+                                     &(mpi_irecv_requests_[i]));
+        }
+      }
+      // next handle the sends, there is no setup for sends
+      #pragma omp for schedule(static,1) nowait
+      for (size_type i = 0; i < actualNumSends_jje; ++i)
+      {
+        if (procsTo_[i] != myRank) {
+          exports_view_type tmpSend = subview_offset(exports,
+                                                     startsTo_[i]*numPackets,
+                                                     lengthsTo_[i]*numPackets);
+          const auto rc = MPI_Isend(tmpSend.data(),
+                                    sizeof(typename ExpView::non_const_value_type)*lengthsTo_[i]*numPackets,
+                                    MPI_BYTE,
+                                    procsTo_[i],
+                                    tag,
+                                    rawComm,
+                                    &(mpi_isend_requests_[i]));
+        } else {
+          //self message
+          
+          // This is how we "send a message to ourself": we copy from
+          // the export buffer to the import buffer.  That saves
+          // Teuchos::Comm implementations other than MpiComm (in
+          // particular, SerialComm) the trouble of implementing self
+          // messages correctly.  (To do this right, SerialComm would
+          // need internal buffer space for messages, keyed on the
+          // message's tag.)
+          deep_copy_offset(imports, exports, selfReceiveOffset_jje,
+                           startsTo_[i]*numPackets,
+                           lengthsTo_[i]*numPackets);
+          mpi_isend_requests_[i] = MPI_REQUEST_NULL;
+        }
+      }
+    } // end parallel region
+    if (verbose_) {
+      std::ostringstream os;
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts_jje(3 args, Kokkos, "
+         << (indicesTo_.empty () ? "fast" : "slow") << "): "
+         << "Post isends done. numPackets = " << numPackets << "\n";
+      *out_ << os.str ();
+    }
+ } // guard my code
+ else {
 
     // Post the nonblocking receives.  It's common MPI wisdom to post
     // receives before sends.  In MPI terms, this means favoring
@@ -2219,7 +2347,7 @@ namespace Tpetra {
         if (procsFrom_[i] != myRank) {
           if (verbose_) {
             std::ostringstream os;
-            os << "Proc " << myRank << ": doPosts(3 args, Kokkos, "
+            os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts(3 args, Kokkos, "
                << (indicesTo_.empty () ? "fast" : "slow") << "): "
                << "Post irecv: {source: " << procsFrom_[i]
                << ", tag: " << tag << "}" << endl;
@@ -2258,7 +2386,7 @@ namespace Tpetra {
 
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myRank << ": doPosts(3 args, Kokkos, "
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts(3 args, Kokkos, "
            << (indicesTo_.empty () ? "fast" : "slow") << "): Barrier" << endl;
         *out_ << os.str ();
       }
@@ -2293,7 +2421,7 @@ namespace Tpetra {
 
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank << ": doPosts(3 args, Kokkos, "
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts(3 args, Kokkos, "
          << (indicesTo_.empty () ? "fast" : "slow") << "): Post sends" << endl;
       *out_ << os.str ();
     }
@@ -2301,7 +2429,7 @@ namespace Tpetra {
     if (indicesTo_.empty()) {
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myRank
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
            << ": doPosts(3 args, Kokkos, fast): posting sends" << endl;
         *out_ << os.str ();
       }
@@ -2317,7 +2445,7 @@ namespace Tpetra {
         if (procsTo_[p] != myRank) {
           if (verbose_) {
             std::ostringstream os;
-            os << "Proc " << myRank << ": doPosts(3 args, Kokkos, fast): Post send: "
+            os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts(3 args, Kokkos, fast): Post send: "
               "{target: " << procsTo_[p] << ", tag: " << tag << "}" << endl;
             *out_ << os.str ();
           }
@@ -2363,7 +2491,7 @@ namespace Tpetra {
       if (selfMessage_) {
         if (verbose_) {
           std::ostringstream os;
-          os << "Proc " << myRank
+          os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
              << ": doPosts(3 args, Kokkos, fast): Self-send" << endl;
           *out_ << os.str ();
         }
@@ -2380,14 +2508,14 @@ namespace Tpetra {
       }
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myRank << ": doPosts(3 args, Kokkos, fast) done" << endl;
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts(3 args, Kokkos, fast) done" << endl;
         *out_ << os.str ();
       }
     }
     else { // data are not blocked by proc, use send buffer
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myRank
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
            << ": doPosts(3 args, Kokkos, slow): posting sends" << endl;
         *out_ << os.str ();
       }
@@ -2416,7 +2544,7 @@ namespace Tpetra {
         if (procsTo_[p] != myRank) {
           if (verbose_) {
             std::ostringstream os;
-            os << "Proc " << myRank
+            os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
                << ": doPosts(3 args, Kokkos, slow): Post send: {target: "
                << procsTo_[p] << ", tag: " << tag << "}" << endl;
             *out_ << os.str ();
@@ -2471,7 +2599,7 @@ namespace Tpetra {
       if (selfMessage_) {
         if (verbose_) {
           std::ostringstream os;
-          os << "Proc " << myRank
+          os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
              << ": doPosts(3 args, Kokkos, slow): Self-send" << endl;
           *out_ << os.str ();
         }
@@ -2484,7 +2612,7 @@ namespace Tpetra {
       }
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myRank
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank
            << ": doPosts(3 args, Kokkos, slow) done" << endl;
         *out_ << os.str ();
       }
@@ -2492,9 +2620,10 @@ namespace Tpetra {
 
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank << ": doPosts done" << endl;
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": doPosts done" << endl;
       *out_ << os.str ();
     }
+   } // JJE guard
   }
 
   template <class ExpView, class ImpView>
@@ -2607,7 +2736,7 @@ namespace Tpetra {
 #endif // HAVE_TEUCHOS_DEBUG
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myProcID << ": doPosts(4 args, Kokkos, "
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID << ": doPosts(4 args, Kokkos, "
          << (indicesTo_.empty () ? "fast" : "slow") << ")" << endl;
       *out_ << os.str ();
     }
@@ -2716,7 +2845,7 @@ namespace Tpetra {
     if (indicesTo_.empty()) {
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myProcID
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID
            << ": doPosts(4 args, Kokkos, fast): posting sends" << endl;
         *out_ << os.str ();
       }
@@ -2773,14 +2902,14 @@ namespace Tpetra {
       }
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myProcID << ": doPosts(4 args, Kokkos, fast) done" << endl;
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID << ": doPosts(4 args, Kokkos, fast) done" << endl;
         *out_ << os.str ();
       }
     }
     else { // data are not blocked by proc, use send buffer
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myProcID << ": doPosts(4 args, Kokkos, slow): posting sends" << endl;
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID << ": doPosts(4 args, Kokkos, slow): posting sends" << endl;
         *out_ << os.str ();
       }
 
@@ -2864,7 +2993,7 @@ namespace Tpetra {
       }
       if (verbose_) {
         std::ostringstream os;
-        os << "Proc " << myProcID
+        os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myProcID
            << ": doPosts(4 args, Kokkos, slow) done" << endl;
         *out_ << os.str ();
       }
@@ -2961,7 +3090,10 @@ namespace Tpetra {
     const int myRank = comm_->getRank ();
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank << ": computeSends" << endl;
+      os << __FILE__ << ":" 
+         << std::to_string(__LINE__) 
+         << ":" << __func__ 
+         << ": Proc " << myRank << ": computeSends" << endl;
       *out_ << os.str ();
     }
 
@@ -2985,7 +3117,7 @@ namespace Tpetra {
     Distributor tempPlan (comm_, out_);
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank << ": computeSends: tempPlan.createFromSends" << endl;
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": computeSends: tempPlan.createFromSends" << endl;
       *out_ << os.str ();
     }
 
@@ -3038,7 +3170,7 @@ namespace Tpetra {
     Array<size_t> exportObjs (tempPlan.getTotalReceiveLength () * 2);
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank << ": computeSends: tempPlan.doPostsAndWaits" << endl;
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": computeSends: tempPlan.doPostsAndWaits" << endl;
       *out_ << os.str ();
     }
     tempPlan.doPostsAndWaits<size_t> (importObjs (), 2, exportObjs ());
@@ -3051,7 +3183,7 @@ namespace Tpetra {
 
     if (verbose_) {
       std::ostringstream os;
-      os << "Proc " << myRank << ": computeSends done" << endl;
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": computeSends done" << endl;
       *out_ << os.str ();
     }
   }
@@ -3107,7 +3239,7 @@ namespace Tpetra {
       // even if we account for selfMessage_.  selfMessage_ is set in
       // createFromSends.
       std::ostringstream os;
-      os << "Proc " << myRank << ": {numProcsSendingToMe: "
+      os << __FILE__ << ":" << std::to_string(__LINE__) << ":" << __func__ << ": Proc " << myRank << ": {numProcsSendingToMe: "
          << numProcsSendingToMe << ", remoteProcIDs.size(): "
          << remoteProcIDs.size () << ", selfMessage_: "
          << (selfMessage_ ? "true" : "false") << "}" << std::endl;
