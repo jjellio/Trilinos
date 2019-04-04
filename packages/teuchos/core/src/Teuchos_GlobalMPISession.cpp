@@ -55,7 +55,9 @@
 
 
 
-bool USE_JJE_THREAD_MULTIPLE = false;
+bool TRILINOS_USE_THREAD_MULTIPLE = false;
+bool USE_JJE_DISTRIBUTOR = false;
+bool USE_JJE_PERSISTENT_REQUESTS = false;
 
 namespace Teuchos {
 
@@ -72,6 +74,14 @@ std::vector<std::string> GlobalMPISession::argvCopy_;
 
 #endif // HAVE_TEUCHOSCORE_KOKKOSCORE
 
+namespace {
+  bool readENVVariable (const std::string name, const std::string enable_str) {
+
+  const char *     cstr_ = std::getenv ( name.c_str() );
+  const std::string str_ = cstr_ == NULL ? "" : cstr_;
+  return ((str_ == enable_str) ? true : false);
+}
+} // anon namespace
 
 GlobalMPISession::GlobalMPISession( int* argc, char*** argv, std::ostream *out )
 {
@@ -97,14 +107,14 @@ GlobalMPISession::GlobalMPISession( int* argc, char*** argv, std::ostream *out )
   }
 
   // Initialize MPI
-  const char * t = std::getenv ("USE_JJE_THREAD_MULTIPLE");
-  const std::string useMPI_Thread_multiple_str = t == NULL ? "" : t;
-  const bool useMPI_Thread_multiple = (useMPI_Thread_multiple_str == "YES") ? true : false;
+  ::TRILINOS_USE_THREAD_MULTIPLE = readENVVariable("TRILINOS_INIT_MPI_THREAD_MULTIPLE", "YES");;
+  ::USE_JJE_DISTRIBUTOR = readENVVariable( "USE_JJE_DISTRIBUTOR", "YES");
+  ::USE_JJE_PERSISTENT_REQUESTS = readENVVariable( "USE_JJE_PERSISTENT_REQUESTS", "YES");
 
-  if ( useMPI_Thread_multiple)
+  if ( ::TRILINOS_USE_THREAD_MULTIPLE )
   {
     int provided_mpi_level = -1;
-    ::USE_JJE_THREAD_MULTIPLE=true;
+
     mpierr = ::MPI_Init_thread(argc, argv, MPI_THREAD_MULTIPLE, &provided_mpi_level);
     if (provided_mpi_level != MPI_THREAD_MULTIPLE) {
       if (out) {
@@ -114,7 +124,7 @@ GlobalMPISession::GlobalMPISession( int* argc, char*** argv, std::ostream *out )
       }
       std::terminate();
     } else {
-      if (out) *out << "GlobalMPISession(): Using THREAD_MULTIPLE\n";
+      std::cout << "GlobalMPISession(): Using THREAD_MULTIPLE" << std::endl;
     }
   } else {
     mpierr = ::MPI_Init(argc, (char ***) argv);

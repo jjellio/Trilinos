@@ -44,8 +44,9 @@
 #include "Teuchos_VerboseObjectParameterListHelpers.hpp"
 #include <numeric>
 
+extern bool USE_JJE_DISTRIBUTOR;
+extern bool USE_JJE_PERSISTENT_REQUESTS;
 
-extern bool USE_JJE_THREAD_MULTIPLE;
 
 namespace { // (anonymous)
 
@@ -294,6 +295,22 @@ namespace Tpetra {
     // We don't need to swap timers, because all instances of
     // Distributor use the same timers.
   }
+
+  Distributor::~Distributor() {
+    for (auto r : mpi_irecv_requests_) {
+      if (r != MPI_REQUEST_NULL) {
+        MPI_Cancel( &r );
+        MPI_Request_free( &r );
+      }
+    }
+    for (auto r : mpi_isend_requests_) {
+      if (r != MPI_REQUEST_NULL) {
+        MPI_Cancel( &r );
+        MPI_Request_free( &r );
+      }
+    }
+  }
+
 
   void
   Distributor::
@@ -560,26 +577,34 @@ namespace Tpetra {
       *out_ << os.str ();
     }
 
- if (indicesTo_.empty() && requests_.size() == 0 && ::USE_JJE_THREAD_MULTIPLE) //&& sendType_ == Details::DISTRIBUTOR_ISEND) {
+ if (indicesTo_.empty() && requests_.size() == 0 && ::USE_JJE_DISTRIBUTOR) //&& sendType_ == Details::DISTRIBUTOR_ISEND) {
  { 
   #pragma omp parallel
    {
      if (mpi_isend_requests_.size () > 0) {
+       #if defined(USE_OMP_THREAD_WAIT)
        #pragma omp for schedule(static,1) nowait
        for (size_t  i =0; i < mpi_isend_requests_.size(); ++i)
        {
          if (mpi_isend_requests_[i] != MPI_REQUEST_NULL)
            MPI_Wait(&(mpi_isend_requests_[i]), MPI_STATUS_IGNORE);
        }
+       #else
+       MPI_Waitall(mpi_isend_requests_.size(), mpi_isend_requests_.data(), MPI_STATUS_IGNORE);
+       #endif
      }
 
      if (mpi_irecv_requests_.size () > 0) {
+       #if defined(USE_OMP_THREAD_WAIT)
        #pragma omp for schedule(static,1) nowait
        for (size_t  i =0; i < mpi_irecv_requests_.size(); ++i)
        {
          if (mpi_irecv_requests_[i] != MPI_REQUEST_NULL)
            MPI_Wait(&(mpi_irecv_requests_[i]), MPI_STATUS_IGNORE);
        }
+       #else
+       MPI_Waitall(mpi_irecv_requests_.size(), mpi_irecv_requests_.data(), MPI_STATUS_IGNORE);
+       #endif
      }
    } // end parallel
 

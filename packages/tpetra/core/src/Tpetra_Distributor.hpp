@@ -71,7 +71,9 @@
   #include "Tpetra_Details_MpiTypeTraits.hpp"
 #endif // HAVE_TPETRACORE_MPI
 
-extern bool USE_JJE_THREAD_MULTIPLE;
+//extern bool TRILINOS_USE_THREAD_MULTIPLE;
+extern bool USE_JJE_DISTRIBUTOR;
+extern bool USE_JJE_PERSISTENT_REQUESTS;
 
 namespace Tpetra {
 
@@ -265,7 +267,7 @@ namespace Tpetra {
     ///
     /// \pre No outstanding communication requests.
     ///   (We could check, but see GitHub Issue #1303.)
-    virtual ~Distributor () = default;
+    virtual ~Distributor ();
 
     /// \brief Swap the contents of rhs with those of *this.
     ///
@@ -947,6 +949,9 @@ namespace Tpetra {
     ///   receive and send requests.
     Teuchos::Array<Teuchos::RCP<Teuchos::CommRequest<int> > > requests_;
 
+    //typedef std::tuple<int, int> persistent_mpi_request_tuple_t;
+    //std::map<persistent_mpi_request_tuple_t, MPI_Request> mpi_irecv_requests_;
+    //std::map<persistent_mpi_request_tuple_t, MPI_Request> mpi_isend_requests_;
     Teuchos::Array<MPI_Request> mpi_irecv_requests_;
     Teuchos::Array<MPI_Request> mpi_isend_requests_;
     /// \brief The reverse distributor.
@@ -2212,7 +2217,7 @@ namespace Tpetra {
       *out_ << os.str ();
     }
 
- if (indicesTo_.empty() && ::USE_JJE_THREAD_MULTIPLE) // && sendType == Details::DISTRIBUTOR_ISEND)
+ if (indicesTo_.empty() && ::USE_JJE_DISTRIBUTOR) // && sendType == Details::DISTRIBUTOR_ISEND)
  {
     const size_type actualNumReceives_jje = as<size_type> (numReceives_) +
                                             as<size_type> (selfMessage_ ? 1 : 0);
@@ -2222,20 +2227,31 @@ namespace Tpetra {
     size_t selfReceiveOffset_jje = 0;
     // create a buffer for a thread parallel MPI call
     std::vector<size_t> mpi_irecv_buffer_offsets;
+    bool setup_isends = false;
+    bool setup_irecvs = false;
 
     // setup the sends
     if (actualNumSends_jje > 0) {
-      mpi_isend_requests_.reserve(actualNumSends_jje);
-      mpi_isend_requests_.resize(actualNumSends_jje);
+      if ( mpi_isend_requests_.size() != actualNumSends_jje ) {
+        setup_isends = true;
+        mpi_isend_requests_.reserve(actualNumSends_jje);
+        mpi_isend_requests_.resize(actualNumSends_jje);
+      }
     }
 
     // handle the receives
     if (actualNumReceives_jje > 0 ) {
       size_t curBufferOffset_jje = 0;
-      mpi_irecv_requests_.reserve(actualNumReceives_jje);
-      mpi_irecv_requests_.resize(actualNumReceives_jje);
-      mpi_irecv_buffer_offsets.reserve(actualNumReceives_jje);
-      mpi_irecv_buffer_offsets.resize(actualNumReceives_jje);
+
+      if ( actualNumReceives_jje != mpi_irecv_buffer_offsets.size () ||
+           actualNumReceives_jje != mpi_irecv_requests_.size () )
+      {
+        setup_irecvs = true;
+        mpi_irecv_requests_.reserve(actualNumReceives_jje);
+        mpi_irecv_requests_.resize(actualNumReceives_jje);
+        mpi_irecv_buffer_offsets.reserve(actualNumReceives_jje);
+        mpi_irecv_buffer_offsets.resize(actualNumReceives_jje);
+      }
 
       for (size_type i = 0; i < actualNumReceives_jje; ++i)
       {
@@ -2280,15 +2296,28 @@ namespace Tpetra {
                                                       mpi_irecv_buffer_offsets[i],
                                                       curBufLen);
           // post the receive
-          const auto rc  = MPI_Irecv(recvBuf.data(),
-                                     sizeof(typename ExpView::non_const_value_type)*curBufLen,
-                                     MPI_BYTE,
-                                     procsFrom_[i],
-                                     tag,
-                                     rawComm,
-                                     &(mpi_irecv_requests_[i]));
-        }
-      }
+          if (::USE_JJE_PERSISTENT_REQUESTS) {
+            if (setup_irecvs) {
+              const auto rc  = MPI_Recv_init(recvBuf.data(),
+                                              sizeof(typename ExpView::non_const_value_type)*curBufLen,
+                                              MPI_BYTE,
+                                              procsFrom_[i],
+                                              tag,
+                                              rawComm,
+                                              &(mpi_irecv_requests_[i]));
+            }
+            MPI_Start( &(mpi_irecv_requests_[i]) );
+          } else {
+            const auto rc  = MPI_Irecv(recvBuf.data(),
+                                       sizeof(typename ExpView::non_const_value_type)*curBufLen,
+                                       MPI_BYTE,
+                                       procsFrom_[i],
+                                       tag,
+                                       rawComm,
+                                       &(mpi_irecv_requests_[i]));
+          } // end persistent condition
+        } // end self condition
+      } // end recv loop
       // next handle the sends, there is no setup for sends
       #pragma omp for schedule(static,1) nowait
       for (size_type i = 0; i < actualNumSends_jje; ++i)
@@ -2297,13 +2326,26 @@ namespace Tpetra {
           exports_view_type tmpSend = subview_offset(exports,
                                                      startsTo_[i]*numPackets,
                                                      lengthsTo_[i]*numPackets);
-          const auto rc = MPI_Isend(tmpSend.data(),
-                                    sizeof(typename ExpView::non_const_value_type)*lengthsTo_[i]*numPackets,
-                                    MPI_BYTE,
-                                    procsTo_[i],
-                                    tag,
-                                    rawComm,
-                                    &(mpi_isend_requests_[i]));
+          if (::USE_JJE_PERSISTENT_REQUESTS) {
+            if (setup_isends) {
+              const auto rc = MPI_Send_init(tmpSend.data(),
+                                             sizeof(typename ExpView::non_const_value_type)*lengthsTo_[i]*numPackets,
+                                             MPI_BYTE,
+                                             procsTo_[i],
+                                             tag,
+                                             rawComm,
+                                             &(mpi_isend_requests_[i]));
+            }
+            MPI_Start( &(mpi_isend_requests_[i]) );
+          } else {
+            const auto rc = MPI_Isend(tmpSend.data(),
+                                      sizeof(typename ExpView::non_const_value_type)*lengthsTo_[i]*numPackets,
+                                      MPI_BYTE,
+                                      procsTo_[i],
+                                      tag,
+                                      rawComm,
+                                      &(mpi_isend_requests_[i]));
+          } // end persistent condition
         } else {
           //self message
           
@@ -2318,8 +2360,8 @@ namespace Tpetra {
                            startsTo_[i]*numPackets,
                            lengthsTo_[i]*numPackets);
           mpi_isend_requests_[i] = MPI_REQUEST_NULL;
-        }
-      }
+        } // end self condition
+      } // end send loop
     } // end parallel region
     if (verbose_) {
       std::ostringstream os;
