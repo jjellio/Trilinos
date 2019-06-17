@@ -17,3 +17,5 @@ ADD_SUBDIRECTORY(BlockCrs)
 
 ADD_SUBDIRECTORY(utilities)
 ADD_SUBDIRECTORY(advanced)
+
+ADD_SUBDIRECTORY(tpetra-kernel-comparison)
