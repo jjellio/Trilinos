@@ -48,12 +48,16 @@
 #include <KokkosBlas.hpp>
 #include <random>    // random
 #include <algorithm> // shuffle
-#include "descriptive_stats.hpp"
+
+//#define USE_TIMEOFDAY
+#include "descriptive_stats/descriptive_stats.hpp"
+
 
 extern "C" double cblas_ddot (const int n, const double *x, const int incx, const double *y, const int incy);
 extern "C" int openblas_set_num_threads(int);
 
 std::deque<std::string> base_fields {
+    "host",
     "num_procs",
     "rank",
     #if defined(KOKKOS_HAVE_CUDA)
@@ -92,7 +96,7 @@ std::string type_name(const T& v)
 }
 
 
-bool header_flag = false;
+bool printed_header_flag = false;
 
 template<typename ds_array_type, typename experiment_type>
 void analyze_timings(      std::map<experiment_type, ds_array_type>& exp_data,
@@ -102,8 +106,6 @@ void analyze_timings(      std::map<experiment_type, ds_array_type>& exp_data,
                      std::ostream& out)
 {
   // setup the stats stuff
-  using Time = DescriptiveStats::Time;
-  using clock_resolution = DescriptiveStats::ns;
   using ds_map_type = DescriptiveStats::descriptive_stat_map_type;
   using DescriptiveStats::get_descriptive_stats;
   using DescriptiveStats::descriptive_stats_csv_str;
@@ -113,9 +115,6 @@ void analyze_timings(      std::map<experiment_type, ds_array_type>& exp_data,
   std::ostringstream oss;
  
   std::shared_ptr< std::deque<std::string> > output_fields (new std::deque<std::string>(base_fields));
- if (comm->getRank() == 0)
- for (auto f: base_fields)
-   std::cout << f << ' ';
 
   // pad the 'id' field so we get aligned text output
   int max_length = -1;
@@ -134,7 +133,7 @@ void analyze_timings(      std::map<experiment_type, ds_array_type>& exp_data,
 
 
     // compute the stats
-    get_descriptive_stats(exp_data[e], stats);
+    get_descriptive_stats(exp_data[e], stats, DescStats_TICK_RESOLUTION);
     descriptive_stat_map_string_type stats_str;
     stat_map_to_string_map(stats, stats_str);
     std::string padding_str(max_length - exp_to_string[e].length(), ' ');
@@ -142,9 +141,9 @@ void analyze_timings(      std::map<experiment_type, ds_array_type>& exp_data,
 
     // dump the CSV banner first
     bool print_header = false;
-    if ( (!header_flag) && comm->getRank () == 0) {
+    if ( (comm->getRank () == 0) && (!printed_header_flag)){
+      printed_header_flag = true;
       print_header = true;
-      header_flag = true;
     }
 
     descriptive_stats_csv_str (oss, stats_str, output_fields, print_header);
@@ -179,9 +178,6 @@ evaluate_dot(const int local_n, const int stride,
   using Teuchos::REDUCE_SUM;
   using Teuchos::reduceAll;
 
-  using Time = DescriptiveStats::Time;
-  using clock_resolution = DescriptiveStats::ns;
-  using double_secs = DescriptiveStats::double_secs;
 
   using ds_array = std::vector<double>;
 
@@ -204,11 +200,22 @@ evaluate_dot(const int local_n, const int stride,
   vector_type x (contigMap);
   vector_type y (contigMap);
 
+  Teuchos::RCP<const map_type> locallyreplicated_map (new map_type (1,
+                                                      0,
+                                                      comm,
+                                                      Tpetra::LocallyReplicated));
+
+  // multidimensional arrays to store the results
+  vector_type kk_gemv_solution_mv(locallyreplicated_map, 1);
+
   // grab the device views so we can call cublas directly
   typedef typename vector_type::dual_view_type dual_view_type;
   typedef typename dual_view_type::t_dev device_view_type;
   auto cuX = subview ( x.getLocalView<Kokkos::Cuda> (), Kokkos::ALL (), 0);
   auto cuY = subview ( y.getLocalView<Kokkos::Cuda> (), Kokkos::ALL (), 0);
+
+  auto cuX_rk2 = subview ( x.getLocalView<Kokkos::Cuda> (), Kokkos::ALL (), Kokkos::ALL());
+  auto kk_gemv_sol_view = subview( kk_gemv_solution_mv.getLocalView<Kokkos::Cuda> (), Kokkos::ALL (), 0);
 
   cublasHandle_t cublas_handle;
   const auto cublas_status = cublasCreate(&cublas_handle);
@@ -230,6 +237,7 @@ evaluate_dot(const int local_n, const int stride,
   dot_data_pack_t cu_hostpinned;
   dot_data_pack_t cu_reg;
 
+
   // -- create data using native cuda tools
   cudaMallocManaged(&cu_managed.x, local_n*sizeof(scalar_type));
   cudaMallocManaged(&cu_managed.y, local_n*sizeof(scalar_type));
@@ -242,6 +250,12 @@ evaluate_dot(const int local_n, const int stride,
   cudaMallocHost(&cu_hostpinned.x, local_n*sizeof(scalar_type));
   cudaMallocHost(&cu_hostpinned.y, local_n*sizeof(scalar_type));
   cudaMallocHost(&cu_hostpinned.sol, sizeof(scalar_type));
+
+  std::vector<scalar_type> host_x;
+  std::vector<scalar_type> host_y;
+  host_x.reserve(local_n);
+  host_x.resize(local_n);
+  host_y = host_x;
 
   //////////////////////////////////////////////////////////////////////
   // Fill the Vector with a single number, or with random numbers
@@ -269,66 +283,24 @@ evaluate_dot(const int local_n, const int stride,
   cudaMemcpy (cu_reg.x, cuX.data(), local_n*sizeof(scalar_type), cudaMemcpyDeviceToDevice);
   cudaMemcpy (cu_reg.y, cuY.data(), local_n*sizeof(scalar_type), cudaMemcpyDeviceToDevice);
 
+  memcpy(host_x.data(), cu_hostpinned.x, local_n*sizeof(scalar_type));
+  memcpy(host_y.data(), cu_hostpinned.y, local_n*sizeof(scalar_type));
+
   std::vector<double> dots;
   dots.resize(1);
-  
-  double cublas_dot_result;
-  double kk_dot_result;
-  double cblas_result = -1.0;
-//class DotExperiment {
-//public:
-//  using clock_type = DescriptiveStats::Time;
-//  using elapsed_type = DescriptiveStats::double_secs;
-//  using stat_array_type = std::vector<double>;
-//  using clock_resolution = DescriptiveStats::ns;
-//
-//  void run(const int n) = 0;
-//  void getTimings( std::map< std::string, stat_array_type>& timing_data) = 0;
-//  void getName() = 0;
-//
-//  void add_timing(stat_array_type& timings, const elapsed_type& elapsed_time) {
-//    timings.push_back(std::chrono::duration_cast<clock_resolution>(elapsed_time).count ())
-//  }
-//};
-//
-//template<typename view_type>>
-//class KokkosBlasDot :
-//  public DotExperiment {
-//
-//private:
-//
-//  using clock_type      = DotExperiment::clock_type;;
-//  using elapsed_type    = DotExperiment::elapsed_type;
-//  using stat_array_type = DotExperiment::stat_array_type;
-//
-//  view_type& x;
-//  view_type& y;
-//  stat_array_type timings;
-//  const std::string name_;
-//
-//public:
-//  KokkosBlasDot (view_type& x, view_type& y)
-//    : x (x_), y (y_), name_("KokkosBlasDot")
-//  { }
-//
-//  virtual
-//  void getName () { return(name_); }
-//
-//  virtual
-//  void getTimings( std::map< std::string, stat_array_type>& timing_data) {
-//    timing_data[name_] = timings;
-//  }
-//
-//  virtual
-//  void run (const int n)
-//  {
-//    const auto t0 = Time::now ();
-//      const auto kk_dot_result = KokkosBlas::dot(x,y);
-//    const auto t1 = Time::now ();
-//    elapsed_type elapsed_time = t1-t0;
-//    add_timing(timings, elapsed_time);
-//  }
-//}
+
+  double * cublas_dot_result;
+  cudaMallocManaged(&cublas_dot_result, sizeof(double));
+  double * cublas_gemv_result;
+  cudaMallocManaged(&cublas_gemv_result, sizeof(double));
+   
+  double cublas_dot_result_host = std::numeric_limits<scalar_type>::quiet_NaN();
+  cublas_gemv_result[0] = std::numeric_limits<scalar_type>::quiet_NaN();
+  double kk_dot_result     = std::numeric_limits<scalar_type>::quiet_NaN();
+  double kk_gemv_result    = std::numeric_limits<scalar_type>::quiet_NaN();
+  double cblas_result      = std::numeric_limits<scalar_type>::quiet_NaN();
+
+  cublas_dot_result[0] = cublas_dot_result_host;
 
   enum class Experiments { CUBLAS_LOCAL,
                            CUBLAS_NATIVE_MEM,
@@ -341,11 +313,16 @@ evaluate_dot(const int local_n, const int stride,
                            CBLAS2,
                            CBLAS4,
                            CBLAS8,
+                           TIMER,
+                           CUBLAS_GEMV,
+                           KK_GEMV
  };
 
   // create a mapping for experiments to strings
   std::map<Experiments,std::string> exps_to_string;
   exps_to_string[Experiments::CUBLAS_LOCAL] = std::to_string(local_n) + "-CuBLAS_dot";
+  exps_to_string[Experiments::CUBLAS_GEMV] = std::to_string(local_n) + "-CuBLAS_gemv";
+  exps_to_string[Experiments::KK_GEMV] = std::to_string(local_n) + "-KK_gemv";
   exps_to_string[Experiments::CUBLAS_NATIVE_MEM] = std::to_string(local_n) + "-CuBLAS_dot_natmem";
   exps_to_string[Experiments::CUBLAS_HOST_MEM] = std::to_string(local_n) + "-CuBLAS_dot_nathost";
   exps_to_string[Experiments::CUBLAS_UVM_MEM] = std::to_string(local_n) + "-CuBLAS_dot_natuvm";
@@ -356,12 +333,14 @@ evaluate_dot(const int local_n, const int stride,
   exps_to_string[Experiments::CBLAS2] = std::to_string(local_n) + "-Cblas_ddot-2th";
   exps_to_string[Experiments::CBLAS4] = std::to_string(local_n) + "-Cblas_ddot-4th";
   exps_to_string[Experiments::CBLAS8] = std::to_string(local_n) + "-Cblas_ddot-8th";
+  exps_to_string[Experiments::TIMER] = "Timer";
 
   std::vector<Experiments> exps;
-  exps.push_back(Experiments::CBLAS1);
-  exps.push_back(Experiments::CBLAS2);
-  exps.push_back(Experiments::CBLAS4);
-  exps.push_back(Experiments::CBLAS8);
+  exps.push_back(Experiments::TIMER);
+//exps.push_back(Experiments::CBLAS1);
+//exps.push_back(Experiments::CBLAS2);
+//exps.push_back(Experiments::CBLAS4);
+//exps.push_back(Experiments::CBLAS8);
   exps.push_back(Experiments::CUBLAS_LOCAL);
   exps.push_back(Experiments::CUBLAS_NATIVE_MEM);
   exps.push_back(Experiments::CUBLAS_HOST_MEM);
@@ -369,9 +348,9 @@ evaluate_dot(const int local_n, const int stride,
   exps.push_back(Experiments::KK_LOCAL);
   exps.push_back(Experiments::ALL_REDUCE);
   exps.push_back(Experiments::TPETRA_DOT);
+  exps.push_back(Experiments::CUBLAS_GEMV);
+  exps.push_back(Experiments::KK_GEMV);
 
-  int cudaDev = -1;
-  cudaGetDevice(&cudaDev);
 
   // randomize the kernel runs
   std::random_device rd;
@@ -386,146 +365,233 @@ evaluate_dot(const int local_n, const int stride,
 
   if (skip_first) num_samples++;
 
+  DescStats_TIMEPOINT t0, t1;
+  DescStats_TIMEPOINT_DELTA elapsed_time;
+  double capture = 0.0;
+
   for(int nsample=0; nsample < num_samples; ++nsample) {  
     std::shuffle(randomized_exps.begin(), randomized_exps.end(), g);
     MPI_Bcast(randomized_exps.data(), randomized_exps.size()*sizeof(randomized_exps[0]), MPI_BYTE,
               0, MPI_COMM_WORLD);
 
     dots[0] = 0.0;
-    cublas_dot_result = 0.0;
     kk_dot_result = 0.0;
-    double_secs elapsed_time;
 
     for (const auto& e : randomized_exps) {
       switch(e) {
+      case Experiments::TIMER:
+      {
+        DescStats_TIMEPOINT dummy;
+        DescStats_TICK(t0);
+          DescStats_TICK(dummy);
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+      }
+      break;
       case Experiments::CBLAS1:
       {
         openblas_set_num_threads(1);
-        const auto t0 = Time::now ();
-        cblas_result = cblas_ddot (local_n, cu_hostpinned.x, stride,
-                                            cu_hostpinned.y, stride);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t0);
+        //__sync_synchronize();
+        cblas_result = cblas_ddot (local_n, host_x.data(), stride,
+                                            host_y.data(), stride);
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        capture += cblas_result;
       }
+      break;
       case Experiments::CBLAS2:
       {
         openblas_set_num_threads(2);
-        const auto t0 = Time::now ();
-        cblas_result = cblas_ddot (local_n, cu_hostpinned.x, stride,
-                                            cu_hostpinned.y, stride);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t0);
+        //__sync_synchronize();
+        cblas_result = cblas_ddot (local_n, host_x.data(), stride,
+                                            host_y.data(), stride);
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        capture += cblas_result;
       }
+      break;
       case Experiments::CBLAS4:
       {
         openblas_set_num_threads(4);
-        const auto t0 = Time::now ();
-        cblas_result = cblas_ddot (local_n, cu_hostpinned.x, stride,
-                                            cu_hostpinned.y, stride);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t0);
+        //__sync_synchronize();
+        cblas_result = cblas_ddot (local_n, host_x.data(), stride,
+                                            host_y.data(), stride);
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        capture += cblas_result;
       }
+      break;
       case Experiments::CBLAS8:
       {
         openblas_set_num_threads(8);
-        const auto t0 = Time::now ();
-        cblas_result = cblas_ddot (local_n, cu_hostpinned.x, stride,
-                                            cu_hostpinned.y, stride);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t0);
+        //__sync_synchronize();
+        cblas_result = cblas_ddot (local_n, host_x.data(), stride,
+                                            host_y.data(), stride);
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        capture += cblas_result;
       }
+      break;
       case Experiments::KK_LOCAL:
       {
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         kk_dot_result = KokkosBlas::dot(cuX,cuY);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        capture += kk_dot_result;
       }
       break;
       case Experiments::CUBLAS_NATIVE_MEM:
       {
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         auto cuRC = cublasDdot (cublas_handle,
                                 local_n,
                                 cu_reg.x, stride,
                                 cu_reg.y, stride,
                                 &cu_reg.sol_stack);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        capture += cu_reg.sol_stack;
       }
       break;
       case Experiments::CUBLAS_HOST_MEM:
       {
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         auto cuRC = cublasDdot (cublas_handle,
                                 local_n,
                                 cu_hostpinned.x, stride,
                                 cu_hostpinned.y, stride,
                                 &cu_hostpinned.sol_stack);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        capture += cu_hostpinned.sol_stack;
       }
       break;
       case Experiments::CUBLAS_UVM_MEM:
       {
-        const auto t0 = Time::now ();
-        //auto blahRCx = cudaMemPrefetchAsync (cu_managed.x, local_n*sizeof(scalar_type), cudaDev);
-        //auto blahRCy = cudaMemPrefetchAsync (cu_managed.y, local_n*sizeof(scalar_type), cudaDev);
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         auto cuRC = cublasDdot (cublas_handle,
                                 local_n,
                                 cu_managed.x, stride,
                                 cu_managed.y, stride,
                                 &cu_managed.sol_stack);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        capture += cu_managed.sol_stack;
       }
       break;
       case Experiments::CUBLAS_LOCAL:
       {
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         auto cuRC = cublasDdot (cublas_handle,
                                 local_n,
                                 cuX.data(), stride,
                                 cuY.data(), stride,
-                                &cublas_dot_result);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+                                &cublas_dot_result_host);
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
       break;
       case Experiments::ALL_REDUCE:
       {
-        volatile scalar_type foo = cublas_dot_result;
         MPI_Barrier(MPI_COMM_WORLD);
-        const auto t0 = Time::now ();
-        MPI_Allreduce(MPI_IN_PLACE, (scalar_type *) &foo, 1, MPI_DOUBLE,
+        DescStats_TICK(t0);
+        //__sync_synchronize();
+        MPI_Allreduce(MPI_IN_PLACE, &cublas_dot_result_host, 1, MPI_DOUBLE,
                       MPI_SUM, MPI_COMM_WORLD);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
-        cublas_dot_result = foo;
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
       break;
       case Experiments::TPETRA_DOT:
       {
         MPI_Barrier(MPI_COMM_WORLD);
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         x.dot(y, dots);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
       break;
+      case Experiments::CUBLAS_GEMV:
+      {
+        scalar_type alpha = 1.0;
+        scalar_type beta = 0.0;
+        DescStats_TICK(t0);
+        //__sync_synchronize();
+        auto cuRC = cublasDgemv(cublas_handle, CUBLAS_OP_T,
+                           local_n, 1,
+                           &alpha,
+                           cuX.data(), local_n,
+                           cuY.data(), 1,
+                           &beta,
+                           cublas_gemv_result, 1);
+        //__sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+      }
+      break;
+      case Experiments::KK_GEMV:
+      {
+        const char kk_trans = 'T';
+        scalar_type alpha = 1.0;
+        scalar_type beta = 0.0;
+        DescStats_TICK(t0);
+        __sync_synchronize();
+        KokkosBlas::gemv (&kk_trans, alpha, cuX_rk2, cuY, beta, kk_gemv_sol_view);
+        __sync_synchronize();
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        //capture += kk_gemv_result;
+      }
+      break;
+      default: std::cerr << "ERROR\n";
       } // switch
 
-      if (! (skip_first && nsample == 0) )
-        exp_data[e].push_back(std::chrono::duration_cast<clock_resolution>(elapsed_time).count ());
+      if (skip_first && nsample ==  0) continue;
+
+      exp_data[e].push_back(DescStats_TICK_TO_DOUBLE(elapsed_time));
     } //randomized loop
   } // samples
-  
+
+  kk_gemv_result = kk_gemv_sol_view(0);
+
+  // always use the output variables from above so they can't be optimized out
+  std::ostringstream oss;
+  oss << "x.dot(y) = " << dots[0] << ", cublas = " << cublas_dot_result_host << ", kk = " << kk_dot_result
+      << ", cublas_reg = " << cu_reg.sol_stack << ", cuhost = " << cu_hostpinned.sol_stack << ", cuUVM = " << cu_managed.sol_stack
+      << ", cblas1 = " << cblas_result
+      << ", kk_gemv = " << kk_gemv_result
+      << ", cub_gemv = " << cublas_gemv_result << ", kk_gemv = " << kk_gemv_result
+      << "\n"
+      << capture << "\n";
+
   if (comm->getRank () == 3) {
-    if (!header_flag)
-      out << "x.dot(y) = " << dots[0] << ", cublas = " << cublas_dot_result << ", kk = " << kk_dot_result
-          << ", cublas_reg = " << cu_reg.sol_stack << ", cuhost = " << cu_hostpinned.sol_stack << ", cuUVM = " << cu_managed.sol_stack
-          << ", cblas1 = " << cblas_result << "\n";
+    out << oss.str ();
   }
+
+  cudaFree(cublas_dot_result);
+  cudaFree(cublas_gemv_result);
 
   analyze_timings(exp_data, exps, exps_to_string, comm, out);
 }
@@ -546,11 +612,6 @@ evaluate_gemm(const int local_n, const int stride,
   using Teuchos::rcp;
   using Teuchos::REDUCE_SUM;
   using Teuchos::reduceAll;
-
-  using ds_map_type = DescriptiveStats::descriptive_stat_map_type;
-  using Time = DescriptiveStats::Time;
-  using clock_resolution = DescriptiveStats::ns;
-  using double_secs = DescriptiveStats::double_secs;
 
   using ds_array = std::vector<double>;
 
@@ -666,6 +727,9 @@ evaluate_gemm(const int local_n, const int stride,
 
   const bool skip_first = true;
 
+  DescStats_TIMEPOINT t0, t1;
+  DescStats_TIMEPOINT_DELTA elapsed_time;
+
   int num_samples = 1000;
 
   if (skip_first) num_samples++;
@@ -678,14 +742,14 @@ evaluate_gemm(const int local_n, const int stride,
 
     for (const auto& e : randomized_exps) {
       // storage for the delta of two timepoints
-      double_secs elapsed_time;
       switch(e) {
       case Experiments::KK_LOCAL:
       {
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         KokkosBlas::gemm (&xTrans, &yTrans, alpha, cuX, cuY, beta, kk_solution_view);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
       break;
       case Experiments::CUBLAS_LOCAL:
@@ -697,7 +761,8 @@ evaluate_gemm(const int local_n, const int stride,
         int ldb = cuY.extent(0);
         int ldc = cublas_solution_view.extent(0);
 
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         cublasDgemm(cublas_handle,
                            xTrans_cu, yTrans_cu,
                            m,n,k,
@@ -707,65 +772,67 @@ evaluate_gemm(const int local_n, const int stride,
                            &beta,
                            cublas_solution_view.data(),
                            ldc);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
       break;
       case Experiments::ALL_REDUCE_HOST_COPY:
       {
-        //double* d = cublas_solution_mv.getLocalView<Kokkos::Serial> ().data();
-        //gemm_host_results.assign(d, d+(num_mv_left*num_mv_right)); 
-        cublas_solution_mv.sync_host();
-        const double* d = cublas_solution_mv.getLocalView<Kokkos::Serial> ().data();
-        gemm_host_results.assign(d, d+(num_mv_left*num_mv_right)); 
+        double * d;
         MPI_Barrier(MPI_COMM_WORLD);
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
+        //__sync_synchronize();
         {
-        MPI_Allreduce(MPI_IN_PLACE, gemm_host_results.data(), num_mv_left*num_mv_right, MPI_DOUBLE,
+        //cublas_solution_mv.sync_host();
+        d = cublas_solution_mv.getLocalView<Kokkos::Serial> ().data();
+        MPI_Allreduce(MPI_IN_PLACE, d,
+                      //gemm_host_results.data(),
+                      num_mv_left*num_mv_right, MPI_DOUBLE,
                       MPI_SUM, MPI_COMM_WORLD);
         //MPI_Allreduce(cublas_solution_view.data(), gemm_host_results.data(), num_mv_left*num_mv_right, MPI_DOUBLE,
         //              MPI_SUM, MPI_COMM_WORLD);
         }
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
+        gemm_host_results.assign(d, d+(num_mv_left*num_mv_right)); 
       }
       break;
       case Experiments::ALL_REDUCE_CUDA_DEST_HOST:
       {
         MPI_Barrier(MPI_COMM_WORLD);
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
         MPI_Allreduce(cublas_solution_view.data(), gemm_host_results.data(), num_mv_left*num_mv_right, MPI_DOUBLE,
                       MPI_SUM, MPI_COMM_WORLD);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
       case Experiments::ALL_REDUCE_CUDA:
       {
         MPI_Barrier(MPI_COMM_WORLD);
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
         MPI_Allreduce(MPI_IN_PLACE, cublas_solution_view.data(), num_mv_left*num_mv_right, MPI_DOUBLE,
                       MPI_SUM, MPI_COMM_WORLD);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
       break;
       case Experiments::TPETRA:
       {
         MPI_Barrier(MPI_COMM_WORLD);
-        const auto t0 = Time::now ();
+        DescStats_TICK(t0);
         solution.multiply(Teuchos::TRANS,
                           Teuchos::NO_TRANS,
                           alpha,
                           x,y,
                           beta);
-        const auto t1 = Time::now ();
-        elapsed_time = t1-t0;
+        DescStats_TICK(t1);
+        DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
       break;
       } // switch
 
       if (! (skip_first && nsample == 0) )
-        exp_data[e].push_back(std::chrono::duration_cast<clock_resolution>(elapsed_time).count ());
+        exp_data[e].push_back(DescStats_TICK_TO_DOUBLE(elapsed_time));
     } //randomized loop
   } // samples
   
@@ -827,7 +894,11 @@ main (int argc, char *argv[])
   Tpetra::ScopeGuard tpetraScope (&argc, &argv);
   {
     auto comm = Tpetra::getDefaultComm ();
-    for (int N = 10000000; N <= 20000000; N += 10000000) {
+    if (comm->getRank() == 0) std::cerr << "After Initialize\n";
+    MPI_Barrier(MPI_COMM_WORLD);
+
+
+    for (int N = 1000000; N < 2000000; N += 1000000) {
       evaluate_dot (N, stride, comm, std::cout);
     }
 
@@ -856,6 +927,54 @@ main (int argc, char *argv[])
     //descriptive_stats_csv_str (oss, stats_str, nullptr, true);
     //std::cerr << oss.str();
   }
+  Kokkos::finalize();
   MPI_Finalize();
   return 0;
 }
+
+//class DotExperiment {
+//public:
+//  using stat_array_type = std::vector<double>;
+//
+//  void run(const int n) = 0;
+//  void getTimings( std::map< std::string, stat_array_type>& timing_data) = 0;
+//  void getName() = 0;
+//
+//};
+//
+//template<typename view_type>>
+//class KokkosBlasDot :
+//  public DotExperiment {
+//
+//private:
+//
+//  using stat_array_type = DotExperiment::stat_array_type;
+//
+//  view_type& x;
+//  view_type& y;
+//  stat_array_type timings;
+//  const std::string name_;
+//
+//public:
+//  KokkosBlasDot (view_type& x, view_type& y)
+//    : x (x_), y (y_), name_("KokkosBlasDot")
+//  { }
+//
+//  virtual
+//  void getName () { return(name_); }
+//
+//  virtual
+//  void getTimings( std::map< std::string, stat_array_type>& timing_data) {
+//    timing_data[name_] = timings;
+//  }
+//
+//  virtual
+//  void run (const int n)
+//  {
+//    const auto t0 = Time::now ();
+//      const auto kk_dot_result = KokkosBlas::dot(x,y);
+//    const auto t1 = Time::now ();
+//    elapsed_type DescStats_TICKDIFF(t0,elapsed_time,t1);
+//    add_timing(timings, elapsed_time);
+//  }
+//}
