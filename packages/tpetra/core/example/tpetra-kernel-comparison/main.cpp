@@ -52,9 +52,10 @@
 //#define USE_TIMEOFDAY
 #include "descriptive_stats/descriptive_stats.hpp"
 
-
+#if defined(ENABLE_SYSTEM_BLAS)
 extern "C" double cblas_ddot (const int n, const double *x, const int incx, const double *y, const int incy);
 extern "C" int openblas_set_num_threads(int);
+#endif
 
 std::deque<std::string> base_fields {
     "host",
@@ -390,6 +391,7 @@ evaluate_dot(const int local_n, const int stride,
       break;
       case Experiments::CBLAS1:
       {
+        #if defined(ENABLE_SYSTEM_BLAS)
         openblas_set_num_threads(1);
         DescStats_TICK(t0);
         //__sync_synchronize();
@@ -399,10 +401,12 @@ evaluate_dot(const int local_n, const int stride,
         DescStats_TICK(t1);
         DescStats_TICKDIFF(t0,elapsed_time,t1);
         capture += cblas_result;
+        #endif
       }
       break;
       case Experiments::CBLAS2:
       {
+        #if defined(ENABLE_SYSTEM_BLAS)
         openblas_set_num_threads(2);
         DescStats_TICK(t0);
         //__sync_synchronize();
@@ -412,10 +416,12 @@ evaluate_dot(const int local_n, const int stride,
         DescStats_TICK(t1);
         DescStats_TICKDIFF(t0,elapsed_time,t1);
         capture += cblas_result;
+        #endif
       }
       break;
       case Experiments::CBLAS4:
       {
+        #if defined(ENABLE_SYSTEM_BLAS)
         openblas_set_num_threads(4);
         DescStats_TICK(t0);
         //__sync_synchronize();
@@ -425,10 +431,12 @@ evaluate_dot(const int local_n, const int stride,
         DescStats_TICK(t1);
         DescStats_TICKDIFF(t0,elapsed_time,t1);
         capture += cblas_result;
+        #endif
       }
       break;
       case Experiments::CBLAS8:
       {
+        #if defined(ENABLE_SYSTEM_BLAS)
         openblas_set_num_threads(8);
         DescStats_TICK(t0);
         //__sync_synchronize();
@@ -438,6 +446,7 @@ evaluate_dot(const int local_n, const int stride,
         DescStats_TICK(t1);
         DescStats_TICKDIFF(t0,elapsed_time,t1);
         capture += cblas_result;
+        #endif
       }
       break;
       case Experiments::KK_LOCAL:
