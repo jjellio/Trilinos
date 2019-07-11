@@ -96,6 +96,13 @@ std::string type_name(const T& v)
     return tname;
 }
 
+// CUDA Kernel function to add the elements of two arrays on the GPU
+__global__
+void trivial_kernel(int n)
+{
+  int k = n + 1;
+}
+
 
 bool printed_header_flag = false;
 
@@ -316,11 +323,15 @@ evaluate_dot(const int local_n, const int stride,
                            CBLAS8,
                            TIMER,
                            CUBLAS_GEMV,
-                           KK_GEMV
+                           KK_GEMV,
+                           CUDA_SYNC,
+                           CUDA_LAUNCH
  };
 
   // create a mapping for experiments to strings
   std::map<Experiments,std::string> exps_to_string;
+  exps_to_string[Experiments::CUDA_SYNC] = "CudaDeviceSync";
+  exps_to_string[Experiments::CUDA_LAUNCH] = "CudaLaunch";
   exps_to_string[Experiments::CUBLAS_LOCAL] = std::to_string(local_n) + "-CuBLAS_dot";
   exps_to_string[Experiments::CUBLAS_GEMV] = std::to_string(local_n) + "-CuBLAS_gemv";
   exps_to_string[Experiments::KK_GEMV] = std::to_string(local_n) + "-KK_gemv";
@@ -351,7 +362,8 @@ evaluate_dot(const int local_n, const int stride,
   exps.push_back(Experiments::TPETRA_DOT);
   exps.push_back(Experiments::CUBLAS_GEMV);
   exps.push_back(Experiments::KK_GEMV);
-
+  exps.push_back(Experiments::CUDA_SYNC);
+  exps.push_back(Experiments::CUDA_LAUNCH);
 
   // randomize the kernel runs
   std::random_device rd;
@@ -380,6 +392,21 @@ evaluate_dot(const int local_n, const int stride,
 
     for (const auto& e : randomized_exps) {
       switch(e) {
+      case Experiments::CUDA_SYNC:
+      {
+         DescStats_TICK(t0);
+         cudaDeviceSynchronize();
+         DescStats_TICK(t1);
+      }
+      break;
+      case Experiments::CUDA_LAUNCH:
+      {
+        int foo = randomized_exps.size();
+        DescStats_TICK(t0);
+        trivial_kernel<<<1,1>>>(foo);
+        DescStats_TICK(t1);
+      }
+      break;
       case Experiments::TIMER:
       {
         DescStats_TIMEPOINT dummy;
@@ -815,6 +842,7 @@ evaluate_gemm(const int local_n, const int stride,
         DescStats_TICK(t1);
         DescStats_TICKDIFF(t0,elapsed_time,t1);
       }
+      break;
       case Experiments::ALL_REDUCE_CUDA:
       {
         MPI_Barrier(MPI_COMM_WORLD);
@@ -895,27 +923,60 @@ evaluate_gemm(const int local_n, const int stride,
   analyze_timings(exp_data, exps, exps_to_string, comm, out);
 }
 
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+
 int
 main (int argc, char *argv[])
 {
   MPI_Init(&argc,&argv);
+      unsigned int flags = 0;
+      //flags |= cudaDeviceScheduleSpin;
+      flags |= cudaDeviceScheduleYield;
+      //flags |= cudaDeviceLmemResizeToMax;
+      //flags |= cudaDeviceScheduleBlockingSync;
+      gpuErrchk(cudaDeviceReset());
+      gpuErrchk(cudaSetDeviceFlags(flags));
+  Kokkos::initialize(argc,argv);
+  //cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+  cudaDeviceSetCacheConfig(cudaFuncCachePreferNone);
+      gpuErrchk(cudaGetDeviceFlags(&flags));
+
+      using std::cerr;
+      cerr << "Flags = : " << flags << "\n";
+      if ( flags & cudaDeviceScheduleAuto) cerr << "cudaDeviceScheduleAuto\n";
+      if ( flags & cudaDeviceScheduleSpin) cerr << "cudaDeviceScheduleSpin\n";
+      if ( flags & cudaDeviceScheduleYield) cerr << "cudaDeviceScheduleYield\n";
+      if ( flags & cudaDeviceScheduleBlockingSync) cerr << "cudaDeviceScheduleBlockingSync\n";
+      if ( flags & cudaDeviceBlockingSync) cerr << "cudaDeviceBlockingSync\n";
+      if ( flags & cudaDeviceMapHost) cerr << "cudaDeviceMapHost\n";
+      if ( flags & cudaDeviceLmemResizeToMax) cerr << "cudaDeviceLmemResizeToMax\n";
   const int stride = 1;
   Tpetra::ScopeGuard tpetraScope (&argc, &argv);
   {
     auto comm = Tpetra::getDefaultComm ();
-    if (comm->getRank() == 0) std::cerr << "After Initialize\n";
+    if (comm->getRank() == 0) {
+      std::cerr << "After Initialize\n";
+
+    }
     MPI_Barrier(MPI_COMM_WORLD);
 
 
-    for (int N = 1000000; N < 2000000; N += 1000000) {
-      evaluate_dot (N, stride, comm, std::cout);
-    }
+    int N = 10000;
+    evaluate_dot (N, stride, comm, std::cout);
 
-    evaluate_gemm(10000, 1,
-                  2,
-                  1,
-                  comm,
-                  std::cout);
+//    evaluate_gemm(10000, 1,
+//                  2,
+//                  1,
+//                  comm,
+//                  std::cout);
 
     //std::default_random_engine generator;
     //std::normal_distribution<double> distribution(1000.0,5000.0);
