@@ -49,6 +49,9 @@
 #include <random>    // random
 #include <algorithm> // shuffle
 
+       #include <sys/types.h>
+       #include <unistd.h>
+
 //#define USE_TIMEOFDAY
 #include "descriptive_stats/descriptive_stats.hpp"
 
@@ -939,14 +942,14 @@ main (int argc, char *argv[])
   MPI_Init(&argc,&argv);
       unsigned int flags = 0;
       //flags |= cudaDeviceScheduleSpin;
-      flags |= cudaDeviceScheduleYield;
+      //flags |= cudaDeviceScheduleYield;
       //flags |= cudaDeviceLmemResizeToMax;
       //flags |= cudaDeviceScheduleBlockingSync;
-      gpuErrchk(cudaDeviceReset());
-      gpuErrchk(cudaSetDeviceFlags(flags));
+      //gpuErrchk(cudaDeviceReset());
+      //gpuErrchk(cudaSetDeviceFlags(flags));
   Kokkos::initialize(argc,argv);
   //cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
-  cudaDeviceSetCacheConfig(cudaFuncCachePreferNone);
+  //cudaDeviceSetCacheConfig(cudaFuncCachePreferNone);
       gpuErrchk(cudaGetDeviceFlags(&flags));
 
       using std::cerr;
@@ -958,10 +961,21 @@ main (int argc, char *argv[])
       if ( flags & cudaDeviceBlockingSync) cerr << "cudaDeviceBlockingSync\n";
       if ( flags & cudaDeviceMapHost) cerr << "cudaDeviceMapHost\n";
       if ( flags & cudaDeviceLmemResizeToMax) cerr << "cudaDeviceLmemResizeToMax\n";
+
+  auto comm = Tpetra::getDefaultComm ();
+  const auto  my_pid = getpid();
+  std::stringstream ss;
+  ss << "/usr/bin/numastat -z -p " << my_pid;
+
+  for (int r = 0; r < comm->getSize(); ++r) {
+    if ( r == comm->getRank() ) system(ss.str().c_str());
+    fflush(stdout);
+    MPI_Barrier(MPI_COMM_WORLD);
+  }
+
   const int stride = 1;
   Tpetra::ScopeGuard tpetraScope (&argc, &argv);
   {
-    auto comm = Tpetra::getDefaultComm ();
     if (comm->getRank() == 0) {
       std::cerr << "After Initialize\n";
 
@@ -972,11 +986,11 @@ main (int argc, char *argv[])
     int N = 10000;
     evaluate_dot (N, stride, comm, std::cout);
 
-//    evaluate_gemm(10000, 1,
-//                  2,
-//                  1,
-//                  comm,
-//                  std::cout);
+    evaluate_gemm(10000, 1,
+                  2,
+                  1,
+                  comm,
+                  std::cout);
 
     //std::default_random_engine generator;
     //std::normal_distribution<double> distribution(1000.0,5000.0);
@@ -996,6 +1010,12 @@ main (int argc, char *argv[])
     //std::ostringstream oss;
     //descriptive_stats_csv_str (oss, stats_str, nullptr, true);
     //std::cerr << oss.str();
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+  for (int r = 0; r < comm->getSize(); ++r) {
+    if ( r == comm->getRank() ) system(ss.str().c_str());
+    fflush(stdout);
+    MPI_Barrier(MPI_COMM_WORLD);
   }
   Kokkos::finalize();
   MPI_Finalize();
