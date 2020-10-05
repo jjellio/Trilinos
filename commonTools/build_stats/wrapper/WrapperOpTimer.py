@@ -2,8 +2,12 @@ import subprocess
 import csv
 import os
 
+def get_full_header(fields_list,full_header_map):
+  return ','.join([ full_header_map[f] for f in fields_list ])
+
 class WrapperOpTimer:
-  # the values are
+
+# the values are
   usr_bin_time_csv_map = {
     "E":
       "elapsed_real_time_fmt",
@@ -124,7 +128,7 @@ class WrapperOpTimer:
     "x",
     ]
 
-  field_header_full = ','.join([ usr_bin_time_csv_map[f] for f in default_fields ])
+  field_header_full = get_full_header(default_fields, usr_bin_time_csv_map) #','.join([ WrapperOpTimer.usr_bin_time_csv_map[f] for f in default_fields ])
   field_header_short = ','.join(default_fields)
   field_arg = '--format=' + field_header_full + '\n' + ','.join([ '%{}'.format(f) for f in default_fields] )
 
