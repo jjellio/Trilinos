@@ -51,12 +51,13 @@ class NMParser:
       See nm_re_type_expr, nm_re_str, and nm_re in the static fields of this class
     """
     p = subprocess.Popen(['nm', '-aS', filename],
-                         stdout=subprocess.PIPE)
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL)
     output = p.communicate()[0]
 
     nm_counts = dict()
 
-    for line in output.split(os.linesep):
+    for line in output.decode().split(os.linesep):
       m = NMParser.nm_re.match(line)
       if m:
         nm_counts[m.group('type')] = nm_counts.get(m.group('type'), 0) + 1
