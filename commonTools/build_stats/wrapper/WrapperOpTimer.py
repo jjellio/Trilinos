@@ -184,6 +184,9 @@ class WrapperOpTimer:
     # add a field with the short op
     csv_row['op'] = os.path.basename(wcp.op)
 
+    # add a field with the short op
+    csv_row['op'] = os.path.basename(op)
+
     # FileName
     if wcp.base_build_dir:
       abs_base_build_dir = os.path.abspath(wcp.base_build_dir)
