@@ -6,132 +6,133 @@ from WrapperCommandLineParser import WrapperCommandLineParser
 def get_full_header(fields_list,full_header_map):
   return ','.join([ full_header_map[f] for f in fields_list ])
 
-class WrapperOpTimer:
 
 # the values are
-  usr_bin_time_csv_map = {
-    "E":
-      "elapsed_real_time_fmt",
-    "e":
-      "elapsed_real_time_sec",
-    "S":
-      "cpu_sec_kernel_mode",
-    "U":
-      "cpu_sec_user_mode",
-    "P":
-      "perc_cpu_used",
-    "M":
-      "max_resident_size_Kb",
-    "t":
-      "avg_resident_size_Kb",
-    "K":
-      "avg_total_memory_used_Kb",
-    "D":
-      "avg_size_unshared_data_area_Kb",
-    "p":
-      "avg_size_unshared_stack_area_Kb",
-    "X":
-      "avg_size_unshared_text_area_Kb",
-    "Z":
-      'page_size_bytes',
-    "F":
-      "num_major_page_faults",
-    "R":
-      "num_minor_page_faults",
-    "W":
-      "num_swapped",
-    "c":
-      "num_involuntary_context_switch",
-    "w":
-      "num_waits",
-    "I":
-      "num_filesystem_inputs",
-    "O":
-      "num_filesystem_outputs",
-    "r":
-      "num_socket_msg_recv",
-    "s":
-      "num_socket_msg_sent",
-    "k":
-      "num_signals",
-    "x":
-      "exit_status",
-  }
+usr_bin_time_csv_map = {
+  "E":
+    "elapsed_real_time_fmt",
+  "e":
+    "elapsed_real_time_sec",
+  "S":
+    "cpu_sec_kernel_mode",
+  "U":
+    "cpu_sec_user_mode",
+  "P":
+    "perc_cpu_used",
+  "M":
+    "max_resident_size_Kb",
+  "t":
+    "avg_resident_size_Kb",
+  "K":
+    "avg_total_memory_used_Kb",
+  "D":
+    "avg_size_unshared_data_area_Kb",
+  "p":
+    "avg_size_unshared_stack_area_Kb",
+  "X":
+    "avg_size_unshared_text_area_Kb",
+  "Z":
+    'page_size_bytes',
+  "F":
+    "num_major_page_faults",
+  "R":
+    "num_minor_page_faults",
+  "W":
+    "num_swapped",
+  "c":
+    "num_involuntary_context_switch",
+  "w":
+    "num_waits",
+  "I":
+    "num_filesystem_inputs",
+  "O":
+    "num_filesystem_outputs",
+  "r":
+    "num_socket_msg_recv",
+  "s":
+    "num_socket_msg_sent",
+  "k":
+    "num_signals",
+  "x":
+    "exit_status",
+}
 
-  usr_bin_time_desc_map = {
-    "E":
-      "Elapsed real time ([h:]m:s)",
-    "e":
-      "Elapsed real time (s)",
-    "S":
-      "Total number of CPU-seconds that the process spent in kernel mode",
-    "U":
-      "Total number of CPU-seconds that the process spent in user mode",
-    "P":
-      "Percentage of the CPU that this job got",
-    "M":
-      "Maximum resident set size of the process during its lifetime (Kb)",
-    "t":
-      "(Not in tcsh.) Average resident set size of the process (Kb)",
-    "K":
-      "Average total (data+stack+text) memory use of the process (Kb)",
-    "D":
-      "Average size of unshared data area (Kb)",
-    "p":
-      "Average size of unshared stack space (Kb)",
-    "X":
-      "Average size of shared text space (Kb)",
-    "Z":
-      "System page size (bytes)",
-    "F":
-      "Number of major page faults",
-    "R":
-      "Number of minor or recoverable page faults",
-    "W":
-      "Number of times the process was swapped out of main memory",
-    "c":
-      "Number of times the process was context-switched involuntarily",
-    "w":
-      "Number of waits",
-    "I":
-      "Number of file system inputs by the process",
-    "O":
-      "Number of file system outputs by the process",
-    "r":
-      "Number of socket messages received by the process",
-    "s":
-      "Number of socket messages sent by the process",
-    "k":
-      "Number of signals delivered to the process",
-    "x":
-      "(Not in tcsh.) Exit status of the command",
-  }
+usr_bin_time_desc_map = {
+  "E":
+    "Elapsed real time ([h:]m:s)",
+  "e":
+    "Elapsed real time (s)",
+  "S":
+    "Total number of CPU-seconds that the process spent in kernel mode",
+  "U":
+    "Total number of CPU-seconds that the process spent in user mode",
+  "P":
+    "Percentage of the CPU that this job got",
+  "M":
+    "Maximum resident set size of the process during its lifetime (Kb)",
+  "t":
+    "(Not in tcsh.) Average resident set size of the process (Kb)",
+  "K":
+    "Average total (data+stack+text) memory use of the process (Kb)",
+  "D":
+    "Average size of unshared data area (Kb)",
+  "p":
+    "Average size of unshared stack space (Kb)",
+  "X":
+    "Average size of shared text space (Kb)",
+  "Z":
+    "System page size (bytes)",
+  "F":
+    "Number of major page faults",
+  "R":
+    "Number of minor or recoverable page faults",
+  "W":
+    "Number of times the process was swapped out of main memory",
+  "c":
+    "Number of times the process was context-switched involuntarily",
+  "w":
+    "Number of waits",
+  "I":
+    "Number of file system inputs by the process",
+  "O":
+    "Number of file system outputs by the process",
+  "r":
+    "Number of socket messages received by the process",
+  "s":
+    "Number of socket messages sent by the process",
+  "k":
+    "Number of signals delivered to the process",
+  "x":
+    "(Not in tcsh.) Exit status of the command",
+}
 
-  default_fields = [
-    "e",
-    "M",
-    "K",
-    "D",
-    "X",
-    "F",
-    "R",
-    "W",
-    "w",
-    "c",
-    "S",
-    "U",
-    "P",
-    "I",
-    "O",
-    "r",
-    "s",
-    "k",
-    "x",
-    ]
+default_fields = [
+  "e",
+  "M",
+  "K",
+  "D",
+  "X",
+  "F",
+  "R",
+  "W",
+  "w",
+  "c",
+  "S",
+  "U",
+  "P",
+  "I",
+  "O",
+  "r",
+  "s",
+  "k",
+  "x",
+  ]
 
-  field_header_full = get_full_header(default_fields, usr_bin_time_csv_map) #','.join([ WrapperOpTimer.usr_bin_time_csv_map[f] for f in default_fields ])
-  field_header_short = ','.join(default_fields)
-  field_arg = '--format=' + field_header_full + '\n' + ','.join([ '%{}'.format(f) for f in default_fields] )
+field_header_full = get_full_header(default_fields, usr_bin_time_csv_map) #','.join([ WrapperOpTimer.usr_bin_time_csv_map[f] for f in default_fields ])
+field_header_short = ','.join(default_fields)
+field_arg = '--format=' + field_header_full + '\n' + ','.join([ '%{}'.format(f) for f in default_fields] )
+
+class WrapperOpTimer:
 
   @staticmethod
   def run_cmd(cmd):
@@ -155,14 +156,17 @@ class WrapperOpTimer:
     fields = []
     csv_row = {}
 
-    cmd = [
-            '/usr/bin/time',
-            # '--append',
-            '--output=' + wcp.output_stats_file,
-            WrapperOpTimer.field_arg,
-            wcp.op ] + wcp.op_args
-
-    returncode = WrapperOpTimer.run_cmd(cmd)
+    cmdcount = 0
+    returncode = 0
+    for cmd in wcp.commands:
+      if cmdcount == 0:
+        cmd = [ '/usr/bin/time',
+                # '--append',
+                '--output=' + wcp.output_stats_file,
+                field_arg,
+               ] + cmd
+      cmdcount += 1
+      returncode |= WrapperOpTimer.run_cmd(cmd)
 
     # reading csv file
     with open(wcp.output_stats_file, 'r') as csvfile:
@@ -173,16 +177,21 @@ class WrapperOpTimer:
       fields = next(csvreader)
 
       # extracting each data row one by one
-      # we effectively retain on the last row.
+      # we effectively retain only the last row.
       # it isn't clear if we should expect multiple rows per file
+      #
+      # In the bash version of this I was able to handle multiple rows per file
+      # We could do that here, but it would require returning a list of csv maps
+      # On the system side of things, it is very murky.  We would need to ensure
+      # file integrity (concurrent reads/writes).  For now, it's
+      # best to enforce 1 file per operation performed. (which should happen if we
+      # name things correctly) - That is invalid is there is a cycle in the Build graph,
+      # but that is a larger problem.
       for row in csvreader:
         csv_row = dict(zip(fields, row))
 
     # FileSize
     csv_row['FileSize'] = WrapperOpTimer.get_file_size(wcp.op_output_file)
-
-    # add a field with the short op
-    csv_row['op'] = os.path.basename(wcp.op)
 
     # add a field with the short op
     csv_row['op'] = os.path.basename(wcp.op)
