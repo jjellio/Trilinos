@@ -60,6 +60,7 @@
 #include "Teuchos_Ptr.hpp"
 #include "Teuchos_Array.hpp"
 #include "Teuchos_Tuple.hpp"
+#include "Teuchos_DefaultComm.hpp"
 #include "Piro_Helpers.hpp" 
 
 #include <stdexcept>
