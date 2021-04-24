@@ -219,8 +219,6 @@ Fri Aug 15 16:29:47 EDT 1997
 #include<cstring>
 #include<cmath>
 #include <cstdlib>
-using std::malloc;
-using std::free;
 using std::size_t;
 
 char* substr(const char* S, const int pos, const int len);
@@ -254,7 +252,7 @@ int readHB_info(const char* filename, int* M, int* N, int* nz, char** Type,
     char Title[73], Key[9], Rhstype[4];
     char Ptrfmt[17], Indfmt[17], Valfmt[21], Rhsfmt[21];
 
-    mat_type = (char *) malloc(4);
+    mat_type = (char *) std::malloc(4);
     if ( mat_type == NULL ) IOHBTerminate("Insufficient memory for mat_type\n");
 
     if ( (in_file = std::fopen( filename, "r")) == NULL ) {
@@ -434,7 +432,7 @@ int readHB_mat_double(const char* filename, int colptr[], int rowind[],
     offset = 1-_SP_base;  /* if base 0 storage is declared (via macro definition), */
                           /* then storage entries are offset by 1                  */
 
-    ThisElement = (char *) malloc(Ptrwidth+1);
+    ThisElement = (char *) std::malloc(Ptrwidth+1);
     if ( ThisElement == NULL ) IOHBTerminate("Insufficient memory for ThisElement.");
     *(ThisElement+Ptrwidth) = '\0';
     count=0;
@@ -456,11 +454,11 @@ int readHB_mat_double(const char* filename, int colptr[], int rowind[],
           count++; col += Ptrwidth;
        }
     }
-    free(ThisElement);
+    std::free(ThisElement);
 
 /*  Read row index array:  */
 
-    ThisElement = (char *) malloc(Indwidth+1);
+    ThisElement = (char *) std::malloc(Indwidth+1);
     if ( ThisElement == NULL ) IOHBTerminate("Insufficient memory for ThisElement.");
     *(ThisElement+Indwidth) = '\0';
     count = 0;
@@ -482,7 +480,7 @@ int readHB_mat_double(const char* filename, int colptr[], int rowind[],
           count++; col += Indwidth;
        }
     }
-    free(ThisElement);
+    std::free(ThisElement);
 
 /*  Read array of values:  */
 
@@ -491,7 +489,7 @@ int readHB_mat_double(const char* filename, int colptr[], int rowind[],
        if ( Type[0] == 'C' ) Nentries = 2*Nnzero;
            else Nentries = Nnzero;
 
-    ThisElement = (char *) malloc(Valwidth+2);
+    ThisElement = (char *) std::malloc(Valwidth+2);
     if ( ThisElement == NULL ) IOHBTerminate("Insufficient memory for ThisElement.");
     *(ThisElement+Valwidth) = '\0';
     *(ThisElement+Valwidth+1) = '\0';
@@ -531,7 +529,7 @@ int readHB_mat_double(const char* filename, int colptr[], int rowind[],
           *(ThisElement+Valwidth+1) = '\0';
        }
     }
-    free(ThisElement);
+    std::free(ThisElement);
     }
 
     std::fclose(in_file);
@@ -696,7 +694,7 @@ int readHB_aux_double(const char* filename, const char AuxType, double b[])
 /*  Read a vector of desired type, then skip to next */
 /*  repeating to fill Nrhs vectors                   */
 
-  ThisElement = (char *) malloc(Rhswidth+1);
+  ThisElement = (char *) std::malloc(Rhswidth+1);
   if ( ThisElement == NULL ) IOHBTerminate("Insufficient memory for ThisElement.");
   *(ThisElement+Rhswidth) = '\0';
   for (rhsi=0;rhsi<Nrhs;rhsi++) {
@@ -745,7 +743,7 @@ int readHB_aux_double(const char* filename, const char AuxType, double b[])
     }
 
   }
-  free(ThisElement);
+  std::free(ThisElement);
 
 
     std::fclose(in_file);
@@ -1018,7 +1016,7 @@ int readHB_mat_char(const char* filename, int colptr[], int rowind[],
     offset = 1-_SP_base;  /* if base 0 storage is declared (via macro definition), */
                           /* then storage entries are offset by 1                  */
 
-    ThisElement = (char *) malloc(Ptrwidth+1);
+    ThisElement = (char *) std::malloc(Ptrwidth+1);
     if ( ThisElement == NULL ) IOHBTerminate("Insufficient memory for ThisElement.");
     *(ThisElement+Ptrwidth) = '\0';
     count=0;
@@ -1040,11 +1038,11 @@ int readHB_mat_char(const char* filename, int colptr[], int rowind[],
           count++; col += Ptrwidth;
        }
     }
-    free(ThisElement);
+    std::free(ThisElement);
 
 /*  Read row index array:  */
 
-    ThisElement = (char *) malloc(Indwidth+1);
+    ThisElement = (char *) std::malloc(Indwidth+1);
     if ( ThisElement == NULL ) IOHBTerminate("Insufficient memory for ThisElement.");
     *(ThisElement+Indwidth) = '\0';
     count = 0;
@@ -1066,7 +1064,7 @@ int readHB_mat_char(const char* filename, int colptr[], int rowind[],
           count++; col += Indwidth;
        }
     }
-    free(ThisElement);
+    std::free(ThisElement);
 
 /*  Read array of values:  AS CHARACTERS*/
 
@@ -1075,7 +1073,7 @@ int readHB_mat_char(const char* filename, int colptr[], int rowind[],
        if ( Type[0] == 'C' ) Nentries = 2*Nnzero;
            else Nentries = Nnzero;
 
-    ThisElement = (char *) malloc(Valwidth+1);
+    ThisElement = (char *) std::malloc(Valwidth+1);
     if ( ThisElement == NULL ) IOHBTerminate("Insufficient memory for ThisElement.");
     *(ThisElement+Valwidth) = '\0';
     count = 0;
@@ -1576,11 +1574,11 @@ int ParseIfmt(char* fmt, int* perline, int* width)
     tmp = substr(fmt,tmp - fmt + 1, std::strchr(fmt,'I') - tmp - 1);
     *perline = std::atoi(tmp);
     if (*perline == 0 ) *perline = 1 ;
-    if (tmp!=NULL) free ((void *) tmp);
+    if (tmp!=NULL) std::free ((void *) tmp);
     tmp = std::strchr(fmt,'I');
     tmp = substr(fmt,tmp - fmt + 1, std::strchr(fmt,')') - tmp - 1);
     *width = std::atoi(tmp);
-    if (tmp!=NULL) free ((void *) tmp);
+    if (tmp!=NULL) std::free ((void *) tmp);
     return *width;
 }
 
@@ -1643,18 +1641,18 @@ int ParseRfmt(char* fmt, int* perline, int* width, int* prec, int* flag)
     tmp = substr(fmt,tmp - fmt + 1, std::strchr(fmt,*flag) - tmp - 1);
     *perline = std::atoi(tmp);
     if (*perline == 0 ) *perline = 1 ;
-    if (tmp!=NULL) free ((void *) tmp);
+    if (tmp!=NULL) std::free ((void *) tmp);
     tmp = std::strchr(fmt,*flag);
     if ( std::strchr(fmt,'.') ) {
       tmp1 = substr( fmt, std::strchr(fmt,'.') - fmt + 1, std::strchr(fmt,')') - std::strchr(fmt,'.')-1);
       *prec = std::atoi( tmp1 );
-      if (tmp1!=NULL) free ((void *) tmp1);
+      if (tmp1!=NULL) std::free ((void *) tmp1);
       tmp1 = substr(fmt,tmp - fmt + 1, std::strchr(fmt,'.') - tmp - 1);
     } else {
       tmp1 = substr(fmt,tmp - fmt + 1, std::strchr(fmt,')') - tmp - 1);
     }
     *width = std::atoi(tmp1);
-    if (tmp1!=NULL) free ((void *) tmp1);
+    if (tmp1!=NULL) std::free ((void *) tmp1);
     return *width;
 }
 

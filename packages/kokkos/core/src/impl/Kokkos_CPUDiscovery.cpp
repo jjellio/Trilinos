@@ -69,6 +69,7 @@ int processors_per_node() {
   }
   return num_procs;
 #elif defined(__APPLE__)
+  #warn +++++++++++++ Got an apple..
   int ncpu;
   int activecpu;
   size_t size = sizeof(int);
