@@ -91,6 +91,7 @@
 #ifdef HAVE_CSTDLIB
 #include <cstdlib>
 using std::calloc;
+using std::free;
 using std::exit;
 using std::rand;
 using std::abort;
