@@ -12,30 +12,85 @@ function ld_prepend(){
 
 
 echo "Using $ATDM_CONFIG_SYSTEM_NAME compiler stack $ATDM_CONFIG_COMPILER to build $ATDM_CONFIG_BUILD_TYPE code with Kokkos node type $ATDM_CONFIG_NODE_TYPE"
+echo "$ATDM_CONFIG_BUILD_NAME"
+
 
 module purge --silent
-module load mvapich2/2020.12.11-cuda-10.1.243 xl lapack/3.9.0-xl-2020.11.12
+if [[ $ATDM_CONFIG_BUILD_NAME =~ ^(.*-)mvapich2(-.*)$  ]]; then
+  echo "preparing mvapich2 + clang"
 
-# grab XL paths (for use with fortran)
-XL_ROOT=$(dirname -- $(dirname -- $(which xlf)))
-XLF=$(which xlf_r)
-MVAPICH2_ORIG_MPIFC=$(which mpifort)
+  module load cuda/10.1.243
+  module load mvapich2/2020.12.11-cuda-10.1.243 xl lapack/3.9.0-xl-2020.11.12
 
-module load clang/ibm-11.0.1
-MVAPICH2_ORIG_MPICC=$(which mpicc)
-MVAPICH2_ORIG_MPICXX=$(which mpicxx)
+  # grab XL paths (for use with fortran)
+  XL_ROOT=$(dirname -- $(dirname -- $(which xlf)))
+  XLF=$(which xlf_r)
+  MVAPICH2_ORIG_MPIFC=$(which mpifort)
 
-
-export MVAPICH2_ROOT="/usr/tce/packages/mvapich2/osu/mvapich2-2020.12.11-cuda-10.1.243"
-export SPECTRUM_ROOT="/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release"
-
-echo "updating LD_LIRBARY_PATH with mvapich2 and spectrum"
-
-ld_prepend "${SPECTRUM_ROOT}/lib"
-ld_prepend "$MVAPICH2_ROOT/lib64"
-echo LD_LIBRARY_PATH=$LD_LIBRARY_PATH
+  module load clang/ibm-11.0.1
+  MVAPICH2_ORIG_MPICC=$(which mpicc)
+  MVAPICH2_ORIG_MPICXX=$(which mpicxx)
 
 
+  export MVAPICH2_ROOT="/usr/tce/packages/mvapich2/osu/mvapich2-2020.12.11-cuda-10.1.243"
+  export SPECTRUM_ROOT="/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release"
+
+  echo "updating LD_LIRBARY_PATH with mvapich2 and spectrum"
+
+  ld_prepend "${SPECTRUM_ROOT}/lib"
+  ld_prepend "$MVAPICH2_ROOT/lib64"
+  echo LD_LIBRARY_PATH=$LD_LIBRARY_PATH
+
+  # Set common MPI wrappers
+  export MPICC=$MVAPICH2_ORIG_MPICC
+  export MPICXX=$MVAPICH2_ORIG_MPICXX
+  export MPIF90=$MVAPICH2_ORIG_MPIFC
+else
+  echo -n "preparing spectrum "
+  module load cuda/10.1.243                  &>/dev/null
+  module load xl lapack/3.9.0-xl-2020.11.12  &>/dev/null
+  # grab XL paths (for use with fortran)
+  XL_ROOT=$(dirname -- $(dirname -- $(which xlf)))
+  XLF=$(which xlf_r)
+  export MPIF90=$(which mpifort)
+
+  if [[ $ATDM_CONFIG_BUILD_NAME =~ ^(.*-)clang(-.*)$  ]]; then
+    echo "+ clang"
+    module load clang/ibm-11.0.1 &>/dev/null
+    export MPICC=$(which mpicc)
+    export MPICXX=$(which mpicxx)
+  elif [[ $ATDM_CONFIG_BUILD_NAME =~ ^(.*-)xl(-.*)$  ]]; then
+    echo "+ xl"
+    export MPICC=$(which mpicc)
+    export MPICXX=$(which mpicxx)
+    # do the nvcc wrapper song and dance
+    export NVCC_WRAPPER_DEFAULT_COMPILER=$(which xlC_r)
+    export OMPI_CXX=${ATDM_CONFIG_NVCC_WRAPPER}
+    if [ ! -x "$OMPI_CXX" ]; then
+      echo "No nvcc_wrapper found"
+      return
+    fi
+    export ATDM_CONFIG_CXX_FLAGS+="-ccbin ${NVCC_WRAPPER_DEFAULT_COMPILER} -qxflag=disable__cplusplusOverride"
+
+    # set the gcc compiler XL  will use for backend to one that handles c++14
+    export XLC_USR_CONFIG=/opt/ibm/xlC/16.1.1/etc/xlc.cfg.rhel.7.6.gcc.4.8.5.cuda.10.2.2021.3.25.11.42.47
+    export XLF_USR_CONFIG=/opt/ibm/xlf/16.1.1/etc/xlf.cfg.rhel.7.6.gcc.4.8.5.cuda.10.2.2021.3.25.11.42.47
+  else
+    echo "+ gcc"
+    module load gcc/7.3.1 &>/dev/null
+    export MPIF90=$(which mpif90)
+    export MPICC=$(which mpicc)
+    export MPICXX=$(which mpicxx)
+    
+    # do the nvcc wrapper song and dance
+    export NVCC_WRAPPER_DEFAULT_COMPILER=$(which g++)
+    export OMPI_CXX=${ATDM_CONFIG_NVCC_WRAPPER}
+    if [ ! -x "$OMPI_CXX" ]; then
+      echo "No nvcc_wrapper found"
+      return
+    fi
+  fi
+fi
 # Set up stuff related to CUDA
 export CUDA_BIN_PATH=$CUDA_HOME
 
@@ -60,10 +115,6 @@ export ATDM_CONFIG_USE_PTHREADS=OFF
 export ATDM_CONFIG_Kokkos_ENABLE_SERIAL=ON
 export KOKKOS_NUM_DEVICES=4
 
-
-# Prepend path to ninja after all of the modules are loaded
-export PATH=/usr/workspace/emplasma/TPLs/bin/:$PATH
-
 # Set a standard git so everyone has the same git
 module load git/2.20.0
 
@@ -71,16 +122,13 @@ module load git/2.20.0
 export ATDM_CONFIG_LAPACK_LIBS="-L${LAPACK_DIR};-llapack"
 export ATDM_CONFIG_BLAS_LIBS="-L${LAPACK_DIR};-lblas"
 
-# Set common MPI wrappers
-export MPICC=$MVAPICH2_ORIG_MPICC
-export MPICXX=$MVAPICH2_ORIG_MPICXX
-export MPIF90=$MVAPICH2_ORIG_MPIFC
 
 export ATDM_CONFIG_MPI_EXEC=jsrun
 
 export ATDM_CONFIG_MPI_POST_FLAGS="--rs_per_socket;4"
 export ATDM_CONFIG_MPI_EXEC_NUMPROCS_FLAG="-p"
 
+module list
 cat <<- EOF
 Final Config for Lassen:
 MPICC=$MPICC
