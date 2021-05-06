@@ -126,9 +126,9 @@ namespace DefaultTypes {
 
 #ifdef KOKKOS_ENABLE_HIP
   template<>
-  struct CommBufferMemorySpace<Kokkos::Experimental::HIPHostPinnedSpace>
+  struct CommBufferMemorySpace<Kokkos::Experimental::HIPSpace>
   {
-    using type = Kokkos::Experimental::HIPHostPinnedSpace;
+    using type = Kokkos::Experimental::HIPSpace;
   };
 #endif
 
