@@ -128,12 +128,22 @@ export ATDM_CONFIG_MPI_EXEC=jsrun
 export ATDM_CONFIG_MPI_POST_FLAGS="--rs_per_socket;4"
 export ATDM_CONFIG_MPI_EXEC_NUMPROCS_FLAG="-p"
 
+export CC=$MPICC
+export CXX=$MPICXX
+export FC=$MPIF90
+export F90=$MPIF90
+
 module list
 cat <<- EOF
 Final Config for Lassen:
 MPICC=$MPICC
 MPICXX=$MPICXX
 MPIF90=$MPIF90
+
+CC=$CC
+CXX=$CXX
+FC=$FC
+F90=$F90
 EOF
 
 export ATDM_CONFIG_COMPLETED_ENV_SETUP=TRUE

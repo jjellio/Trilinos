@@ -1,0 +1,15 @@
+load this like
+
+mvapich2 supports clang
+spectrum supports clang|gcc|xl
+
+# proxy-load-env.sh [mvapich2|spectrum] [clang|gcc|xl]
+#!/bin/bash
+
+mpiname=${1:-mvapich2}
+comname=${2:-clang}
+
+echo $mpiname ${comname}
+
+TRILINOS=$HOME/src/Trilinos-jje
+source $TRILINOS/cmake/std/atdm/load-env.sh cuda-${comname}-${mpiname}-release-shared $TRILINOS/cmake/std/atdm/lassen
