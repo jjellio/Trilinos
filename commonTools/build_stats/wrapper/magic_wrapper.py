@@ -52,7 +52,8 @@ def main(cmdline_args):
     # only run the command and return the return code
     returncode = 0
     for cmd in wcp.commands:
-      returncode |= WrapperOpTimer.run_cmd(cmd)
+      (rc,stdout,stderr) = WrapperOpTimer.run_cmd(cmd)
+      returncode |= rc
     #print("##======> NO stats {}".format(wcp.op_output_file), file=sys.stdout)
     return returncode
 

@@ -1,5 +1,6 @@
 import subprocess
 import csv
+import sys
 import os
 from WrapperCommandLineParser import WrapperCommandLineParser
 
@@ -136,10 +137,10 @@ class WrapperOpTimer:
 
   @staticmethod
   def run_cmd(cmd):
-    p = subprocess.Popen(cmd)
-    p.communicate()
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    (stdout,stderr) = p.communicate()
     returncode = p.returncode
-    return returncode
+    return (returncode,stdout,stderr)
 
   @staticmethod
   def time_op(wcp):
@@ -156,17 +157,40 @@ class WrapperOpTimer:
     fields = []
     csv_row = {}
 
+    err_file = wcp.op_output_file + '.err'
+    ferr =  open(err_file, "w")
+    # this only times the first one... not sure why?
+    # I suppose we assume CMake only generates one command
+    # which isn't necessarily true (ranlib, ar)
+    # TODO.... figure something out
     cmdcount = 0
     returncode = 0
-    for cmd in wcp.commands:
+    for base_cmd in wcp.commands:
       if cmdcount == 0:
         cmd = [ wcp.time_cmd,
                 # '--append',
                 '--output=' + wcp.output_stats_file,
                 field_arg,
-               ] + cmd
+               ] + base_cmd
       cmdcount += 1
-      returncode |= WrapperOpTimer.run_cmd(cmd)
+      (rc,stdout,stderr) = WrapperOpTimer.run_cmd(cmd)
+      returncode |= rc
+
+      if returncode != 0:
+        print(f"{stdout}\n")
+        sys.stderr.write(f"{stderr}\n")
+        ferr.write("-- command --\n")
+        ferr.write( " \\\n".join([ f"'{c}'" for c in base_cmd ]) )
+        ferr.write("\n-- stdout --\n")
+        ferr.write(stdout)
+        ferr.write(f"\n-- stderr --\n")
+        ferr.write(stderr)
+
+    if ferr:
+      ferr.close()
+
+    if returncode == 0 and os.path.exists(err_file):
+      os.remove(err_file)
 
     # reading csv file
     with open(wcp.output_stats_file, 'r') as csvfile:
