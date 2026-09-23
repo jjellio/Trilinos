@@ -13,6 +13,12 @@ IF(Tpetra_INST_DOUBLE)
     COMM mpi
     CATEGORIES BASIC PERFORMANCE
   )
+  TRIBITS_ADD_EXECUTABLE(
+    Performance-CGSolve-shadow
+    SOURCES cg_solve_file_shadow.cpp
+    COMM mpi
+    CATEGORIES BASIC PERFORMANCE
+  )
 
   SET(COUNTER 1)
   SET(MAX_COUNT 11)

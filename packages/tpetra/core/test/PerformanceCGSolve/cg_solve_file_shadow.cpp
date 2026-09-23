@@ -11,7 +11,11 @@
 //   packages/tpetra/core/test/PerformanceCGSolve/cg_solve_file.cpp
 //
 // Adds a CUDA-VMM direct-address SpMV path while retaining the original
-// Tpetra::CrsMatrix::apply() path as the default baseline.
+// Tpetra::CrsMatrix::apply() path as the default baseline.  In the default
+// --vmm "shadow" mode, EVERY CG SpMV is executed twice from the exact same
+// input vector: once by unmodified Tpetra and once by VMM.  Outputs remain
+// separate, are compared immediately, and the CG recurrence advances only
+// from the Tpetra result.
 //
 // IMPORTANT FIRST-VERSION LIMITATION
 // ----------------------------------
@@ -91,6 +95,9 @@ double tol_large = 0.10;
 
 bool useVmm = false;
 bool validateVmm = true;
+bool vmmShadow = true;
+bool vmmComparePrint = true;
+double vmmCompareTolerance = 1.0e-12;
 std::string vmmIpc = "posix";  // posix on current H200/HGX node, fabric on NVL72/IMEX
 }  // namespace CGParams
 
@@ -701,6 +708,15 @@ class VmmSpmvContext {
   int size_ = 1;
 };
 
+struct ComparisonSummary {
+  std::size_t checks = 0;
+  double maxAbsL2 = 0.0;
+  double maxRelL2 = 0.0;
+  double maxAbsInf = 0.0;
+  double maxRelInf = 0.0;
+  bool passed = true;
+};
+
 }  // namespace VmmExperiment
 
 #endif  // HAVE_TPETRA_INST_CUDA
@@ -710,12 +726,87 @@ static void applyCgOperator(const Teuchos::RCP<CrsMatrix>& A,
                             const Teuchos::RCP<Vector>& x,
                             const Teuchos::RCP<Vector>& y
 #ifdef HAVE_TPETRA_INST_CUDA
-                            , VmmExperiment::VmmSpmvContext<CrsMatrix, Vector>* vmm
+                            , VmmExperiment::VmmSpmvContext<CrsMatrix, Vector>* vmm,
+                            const Teuchos::RCP<Vector>& yVmmShadow,
+                            const Teuchos::RCP<Vector>& diffScratch,
+                            VmmExperiment::ComparisonSummary* comparison,
+                            int applyIndex,
+                            int myproc
 #endif
                             ) {
   using Teuchos::TimeMonitor;
 #ifdef HAVE_TPETRA_INST_CUDA
+  if (vmm != nullptr && CGParams::vmmShadow) {
+    // Correctness-first shadow mode:
+    //   1. Run the unmodified Tpetra operator into y.
+    //   2. Run the VMM operator from the exact same x into a separate vector.
+    //   3. Compare the complete distributed results.
+    //   4. The CG recurrence consumes ONLY y (the Tpetra result).
+    //
+    // This keeps the reference trajectory identical to ordinary Tpetra CG and
+    // prevents small floating-point differences from feeding back into later
+    // search directions and obscuring an operator-level correctness test.
+    {
+      TimeMonitor t(*TimeMonitor::getNewTimer("CG: tpetra spmv"));
+      A->apply(*x, *y);
+    }
+    {
+      TimeMonitor t(*TimeMonitor::getNewTimer("CG: vmm publish"));
+      vmm->publish(*x);
+    }
+    {
+      TimeMonitor t(*TimeMonitor::getNewTimer("CG: vmm spmv"));
+      vmm->applyPublished(*yVmmShadow);
+    }
+    {
+      TimeMonitor t(*TimeMonitor::getNewTimer("CG: vmm compare"));
+
+      // diff = y_vmm - y_tpetra.  All vectors are kept separate.
+      Tpetra::deep_copy(*diffScratch, *yVmmShadow);
+      diffScratch->update(-1.0, *y, 1.0);
+
+      const auto absL2Mag  = diffScratch->norm2();
+      const auto refL2Mag  = y->norm2();
+      const auto absInfMag = diffScratch->normInf();
+      const auto refInfMag = y->normInf();
+
+      const double absL2  = static_cast<double>(absL2Mag);
+      const double refL2  = static_cast<double>(refL2Mag);
+      const double absInf = static_cast<double>(absInfMag);
+      const double refInf = static_cast<double>(refInfMag);
+
+      const double relL2  = refL2  == 0.0 ? absL2  : absL2  / refL2;
+      const double relInf = refInf == 0.0 ? absInf : absInf / refInf;
+
+      comparison->checks += 1;
+      comparison->maxAbsL2  = std::max(comparison->maxAbsL2, absL2);
+      comparison->maxRelL2  = std::max(comparison->maxRelL2, relL2);
+      comparison->maxAbsInf = std::max(comparison->maxAbsInf, absInf);
+      comparison->maxRelInf = std::max(comparison->maxRelInf, relInf);
+
+      const bool finite = std::isfinite(relL2) && std::isfinite(relInf);
+      const bool thisPass = finite &&
+                            relL2  <= CGParams::vmmCompareTolerance &&
+                            relInf <= CGParams::vmmCompareTolerance;
+      comparison->passed = comparison->passed && thisPass;
+
+      if (myproc == 0 && (CGParams::vmmComparePrint || !thisPass)) {
+        std::cout << "VMM-CHECK apply=" << applyIndex
+                  << " absL2=" << absL2
+                  << " relL2=" << relL2
+                  << " absInf=" << absInf
+                  << " relInf=" << relInf
+                  << " tol=" << CGParams::vmmCompareTolerance
+                  << " status=" << (thisPass ? "PASS" : "FAIL")
+                  << std::endl;
+      }
+    }
+    return;
+  }
+
   if (vmm != nullptr) {
+    // Performance-oriented VMM-only mode.  This preserves the earlier
+    // behavior and is selected with --vmm-only.
     {
       TimeMonitor t(*TimeMonitor::getNewTimer("CG: vmm publish"));
       vmm->publish(*x);
@@ -728,7 +819,7 @@ static void applyCgOperator(const Teuchos::RCP<CrsMatrix>& A,
   }
 #endif
   {
-    TimeMonitor t(*TimeMonitor::getNewTimer("CG: spmv"));
+    TimeMonitor t(*TimeMonitor::getNewTimer("CG: tpetra spmv"));
     A->apply(*x, *y);
   }
 }
@@ -741,7 +832,8 @@ bool cg_solve(Teuchos::RCP<CrsMatrix> A,
               double tolerance,
               int max_iter
 #ifdef HAVE_TPETRA_INST_CUDA
-              , VmmExperiment::VmmSpmvContext<CrsMatrix, Vector>* vmm
+              , VmmExperiment::VmmSpmvContext<CrsMatrix, Vector>* vmm,
+              VmmExperiment::ComparisonSummary* comparison
 #endif
               ) {
   using Teuchos::TimeMonitor;
@@ -760,6 +852,18 @@ bool cg_solve(Teuchos::RCP<CrsMatrix> A,
   auto p  = Tpetra::createVector<ScalarType>(A->getRangeMap());
   auto Ap = Tpetra::createVector<ScalarType>(A->getRangeMap());
 
+#ifdef HAVE_TPETRA_INST_CUDA
+  // In shadow mode these remain completely independent of the authoritative
+  // Tpetra Ap used by CG.  They are never fed back into x, r, or p.
+  Teuchos::RCP<Vector> ApVmmShadow;
+  Teuchos::RCP<Vector> ApDiffScratch;
+  if (vmm != nullptr && CGParams::vmmShadow) {
+    ApVmmShadow  = Tpetra::createVector<ScalarType>(A->getRangeMap());
+    ApDiffScratch = Tpetra::createVector<ScalarType>(A->getRangeMap());
+  }
+  int spmvApplyIndex = 0;
+#endif
+
   magnitude_type normr = 0;
   magnitude_type rtrans = 0;
   magnitude_type oldrtrans = 0;
@@ -774,7 +878,8 @@ bool cg_solve(Teuchos::RCP<CrsMatrix> A,
 
   applyCgOperator(A, p, Ap
 #ifdef HAVE_TPETRA_INST_CUDA
-                  , vmm
+                  , vmm, ApVmmShadow, ApDiffScratch, comparison,
+                  spmvApplyIndex++, myproc
 #endif
                   );
 
@@ -819,7 +924,8 @@ bool cg_solve(Teuchos::RCP<CrsMatrix> A,
 
     applyCgOperator(A, p, Ap
 #ifdef HAVE_TPETRA_INST_CUDA
-                    , vmm
+                    , vmm, ApVmmShadow, ApDiffScratch, comparison,
+                    spmvApplyIndex++, myproc
 #endif
                     );
 
@@ -911,7 +1017,11 @@ int run() {
   const Tpetra::global_size_t ng = map->getGlobalNumElements();
   if (myRank == 0) {
     std::cout << "Global matrix size = " << ng << std::endl;
-    std::cout << "SpMV backend = " << (useVmm ? "CUDA VMM direct-address" : "Tpetra apply") << std::endl;
+    std::cout << "SpMV backend = ";
+    if (!useVmm) std::cout << "Tpetra apply";
+    else if (vmmShadow) std::cout << "Tpetra authoritative + CUDA VMM shadow";
+    else std::cout << "CUDA VMM direct-address only";
+    std::cout << std::endl;
   }
 
   RCP<vec_type> x(new vec_type(A->getDomainMap()));
@@ -926,7 +1036,7 @@ int run() {
     const auto ipcMode = VmmExperiment::parseIpcMode(vmmIpc);
     vmm.reset(new VmmExperiment::VmmSpmvContext<crs_matrix_type, vec_type>(A, ipcMode));
 
-    if (validateVmm) {
+    if (validateVmm && !vmmShadow) {
       auto yRef = Tpetra::createVector<Scalar>(A->getRangeMap());
       auto yVmm = Tpetra::createVector<Scalar>(A->getRangeMap());
       auto diff = Tpetra::createVector<Scalar>(A->getRangeMap());
@@ -943,7 +1053,7 @@ int run() {
         std::cout << "VMM validation relative ||Yvmm-Ytpetra||2/||Ytpetra||2 = "
                   << rel << std::endl;
       }
-      if (!(rel < 1.0e-10)) {
+      if (!(rel <= vmmCompareTolerance)) {
         throw std::runtime_error("VMM direct SpMV validation against Tpetra::apply failed");
       }
     }
@@ -952,10 +1062,18 @@ int run() {
   if (useVmm) throw std::runtime_error("This Tpetra build has no CUDA instantiation for --vmm");
 #endif
 
-  // Untimed warm-up apply using the selected backend.
+  // Untimed warm-up.  In shadow mode warm both implementations independently
+  // without mixing their outputs.
 #ifdef HAVE_TPETRA_INST_CUDA
-  if (vmm) vmm->apply(*b, *x);
-  else A->apply(*b, *x);
+  if (vmm && vmmShadow) {
+    auto warmVmm = Tpetra::createVector<Scalar>(A->getRangeMap());
+    A->apply(*b, *x);
+    vmm->apply(*b, *warmVmm);
+  } else if (vmm) {
+    vmm->apply(*b, *x);
+  } else {
+    A->apply(*b, *x);
+  }
 #else
   A->apply(*b, *x);
 #endif
@@ -964,11 +1082,32 @@ int run() {
   RCP<StackedTimer> timer = rcp(new StackedTimer("CG: global"));
   TimeMonitor::setStackedTimer(timer);
 
-  const bool success = cg_solve(A, b, x, myRank, tolerance, niters
 #ifdef HAVE_TPETRA_INST_CUDA
-                                , vmm.get()
+  VmmExperiment::ComparisonSummary vmmComparison;
 #endif
-                                );
+
+  const bool cgSuccess = cg_solve(A, b, x, myRank, tolerance, niters
+#ifdef HAVE_TPETRA_INST_CUDA
+                                  , vmm.get(), &vmmComparison
+#endif
+                                  );
+
+  bool success = cgSuccess;
+#ifdef HAVE_TPETRA_INST_CUDA
+  if (vmm && vmmShadow) {
+    success = success && vmmComparison.passed;
+    if (myRank == 0) {
+      std::cout << "VMM-CHECK-SUMMARY checks=" << vmmComparison.checks
+                << " maxAbsL2=" << vmmComparison.maxAbsL2
+                << " maxRelL2=" << vmmComparison.maxRelL2
+                << " maxAbsInf=" << vmmComparison.maxAbsInf
+                << " maxRelInf=" << vmmComparison.maxRelInf
+                << " tol=" << vmmCompareTolerance
+                << " status=" << (vmmComparison.passed ? "PASS" : "FAIL")
+                << std::endl;
+    }
+  }
+#endif
 
   timer->stopBaseTimer();
   StackedTimer::OutputOptions options;
@@ -977,7 +1116,7 @@ int run() {
   timer->report(std::cout, comm, options);
 
   const std::string testBaseName = std::string("Tpetra CGSolve ") +
-      (useVmm ? "VMM " : "") +
+      (useVmm ? (vmmShadow ? "Tpetra+VMM-shadow " : "VMM-only ") : "") +
       (Tpetra::Details::Behavior::cudaLaunchBlocking() ? "CUDA_LAUNCH_BLOCKING " : "");
   auto xmlOut = timer->reportWatchrXML(testBaseName + std::to_string(comm->getSize()) + " ranks", comm);
 
@@ -992,7 +1131,7 @@ int run() {
   vmm.reset();
 #endif
 
-  return EXIT_SUCCESS;
+  return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 int main(int argc, char* argv[]) {
@@ -1029,9 +1168,15 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("tol_small", &tol_small, "Tolerance for total CG-Time and final residual.");
   cmdp.setOption("tol_large", &tol_large, "Tolerance for individual times.");
   cmdp.setOption("vmm", "no-vmm", &useVmm,
-                 "Use experimental CUDA-VMM direct-address SpMV instead of Tpetra::apply.");
+                 "Enable experimental CUDA-VMM direct-address SpMV support.");
+  cmdp.setOption("vmm-shadow", "vmm-only", &vmmShadow,
+                 "With --vmm, run Tpetra and VMM SpMV from the same input every CG apply, compare them, and advance CG with Tpetra. --vmm-only uses only the VMM result.");
   cmdp.setOption("vmm-validate", "no-vmm-validate", &validateVmm,
-                 "Validate one VMM SpMV against Tpetra::apply before CG.");
+                 "In VMM-only mode, validate one VMM SpMV against Tpetra before CG. Shadow mode validates every SpMV regardless of this option.");
+  cmdp.setOption("vmm-compare-print", "no-vmm-compare-print", &vmmComparePrint,
+                 "Print per-apply L2 and infinity-norm VMM-vs-Tpetra errors in shadow mode.");
+  cmdp.setOption("vmm-compare-tol", &vmmCompareTolerance,
+                 "Maximum allowed relative L2 and relative infinity-norm error in VMM shadow mode.");
   cmdp.setOption("vmm-ipc", &vmmIpc,
                  "VMM IPC backend: posix (same OS) or fabric (NVL72/IMEX).");
 
@@ -1040,6 +1185,11 @@ int main(int argc, char* argv[]) {
 #endif
 
   if (cmdp.parse(argc, argv) != Teuchos::CommandLineProcessor::PARSE_SUCCESSFUL) {
+    return EXIT_FAILURE;
+  }
+
+  if (vmmCompareTolerance < 0.0) {
+    if (myRank == 0) std::cerr << "--vmm-compare-tol must be nonnegative\n";
     return EXIT_FAILURE;
   }
 
