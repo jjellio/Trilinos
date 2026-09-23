@@ -13,6 +13,19 @@ IF(Tpetra_INST_DOUBLE)
     COMM mpi
     CATEGORIES BASIC PERFORMANCE
   )
+
+  TRIBITS_ADD_EXECUTABLE(
+    Performance-CGSolve-fenced
+    SOURCES cg_solve_file.cpp
+    COMM mpi
+    CATEGORIES BASIC PERFORMANCE
+  )
+  
+  TARGET_COMPILE_DEFINITIONS(
+    ${PACKAGE_NAME}_Performance-CGSolve-fenced
+    PRIVATE FENCE_TIMERS=1
+  )
+
   TRIBITS_ADD_EXECUTABLE(
     Performance-CGSolve-shadow
     SOURCES cg_solve_file_shadow.cpp
