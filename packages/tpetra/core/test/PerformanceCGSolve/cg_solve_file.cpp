@@ -25,6 +25,10 @@
 // Current VMM addressing also requires a contiguous Tpetra domain Map.
 // The built-in miniFE matrix generator satisfies this requirement.
 
+#ifdef FENCE_TIMERS
+#pragma message("FENCING TIMERS")
+#endif
+
 #include "Tpetra_CrsMatrix.hpp"
 #include "Tpetra_Core.hpp"
 #include "Tpetra_Map.hpp"
@@ -728,8 +732,17 @@ static void applyCgOperator(const Teuchos::RCP<CrsMatrix>& A,
   }
 #endif
   {
+    #ifdef FENCE_TIMERS
+    Kokkos::fence();
+    MPI_Barrier(MPI_COMM_WORLD);
+    #endif
+
     TimeMonitor t(*TimeMonitor::getNewTimer("CG: spmv"));
     A->apply(*x, *y);
+
+    #ifdef FENCE_TIMERS
+    Kokkos::fence("CG Tpetra SpMV timing fence");
+    #endif
   }
 }
 
@@ -770,6 +783,9 @@ bool cg_solve(Teuchos::RCP<CrsMatrix> A,
   {
     TimeMonitor t(*TimeMonitor::getNewTimer(addTimerName));
     p->update(1.0, *x, 0.0, *x, 0.0);
+    #ifdef FENCE_TIMERS
+    Kokkos::fence("CG axpby p timing fence");
+    #endif
   }
 
   applyCgOperator(A, p, Ap
@@ -781,10 +797,16 @@ bool cg_solve(Teuchos::RCP<CrsMatrix> A,
   {
     TimeMonitor t(*TimeMonitor::getNewTimer(addTimerName));
     r->update(1.0, *b, -1.0, *Ap, 0.0);
+    #ifdef FENCE_TIMERS
+    Kokkos::fence("CG axpby r timing fence");
+    #endif
   }
   {
     TimeMonitor t(*TimeMonitor::getNewTimer(dotTimerName));
     rtrans = r->dot(*r);
+    #ifdef FENCE_TIMERS
+    Kokkos::fence("CG dot timing fence");
+    #endif
   }
 
   normr = std::sqrt(rtrans);
@@ -959,10 +981,20 @@ int run() {
 #else
   A->apply(*b, *x);
 #endif
-  x->putScalar(0);
 
-  RCP<StackedTimer> timer = rcp(new StackedTimer("CG: global"));
-  TimeMonitor::setStackedTimer(timer);
+
+Kokkos::fence("warmup complete");
+x->putScalar(0);
+Kokkos::fence("x reset complete");
+
+// Align the starting line.
+MPI_Barrier(MPI_COMM_WORLD);
+
+// you must start a stacked timer somewhere...
+RCP<StackedTimer> timer = rcp(new StackedTimer("CG: global"));
+TimeMonitor::setStackedTimer(timer);
+
+const double t0 = MPI_Wtime();
 
   const bool success = cg_solve(A, b, x, myRank, tolerance, niters
 #ifdef HAVE_TPETRA_INST_CUDA
@@ -970,9 +1002,28 @@ int run() {
 #endif
                                 );
 
-  timer->stopBaseTimer();
+// Define solver completion as device work completed.
+Kokkos::fence("CG completion");
+
+const double local_elapsed = MPI_Wtime() - t0;
+
+timer->stopBaseTimer();
+double critical_elapsed = 0.0;
+MPI_Reduce(&local_elapsed,
+           &critical_elapsed,
+           1,
+           MPI_DOUBLE,
+           MPI_MAX,
+           0,
+           MPI_COMM_WORLD);
+
+
+
+ 
+
   StackedTimer::OutputOptions options;
   options.print_warnings = false;
+  options.output_proc_minmax = true;
   options.output_fraction = options.output_histogram = options.output_minmax = true;
   timer->report(std::cout, comm, options);
 
@@ -982,6 +1033,7 @@ int run() {
   auto xmlOut = timer->reportWatchrXML(testBaseName + std::to_string(comm->getSize()) + " ranks", comm);
 
   if (myRank == 0) {
+    std::cout << "CG Solve Critical Max Time: " << std::setprecision(std::numeric_limits<double>::max_digits10) << critical_elapsed << "\n";
     if (xmlOut.length()) std::cout << "\nAlso created Watchr performance report " << xmlOut << '\n';
     if (success) std::cout << "End Result: TEST PASSED\n";
     else std::cout << "End Result: TEST FAILED\n";
