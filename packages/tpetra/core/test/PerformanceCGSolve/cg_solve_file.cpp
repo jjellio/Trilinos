@@ -80,6 +80,8 @@
 #include <unistd.h>
 #endif
 
+#include "GaleriHelper.hpp"
+
 namespace CGParams {
 int nsize = 20;
 bool printMatrix = false;
@@ -902,10 +904,31 @@ int run() {
     cout << *comm;
   }
 
+
+if (use_galeri && !matrixName.empty()) {
+    A = my_helper::get_galeri_matrix<Node>(
+        matrixName,
+        nsize,
+        comm);
+}
+else {
+    A = Tpetra::Utils::MatrixGenerator<crs_matrix_type>::
+        generate_miniFE_matrix(nsize, comm);
+}
+
+
+
   RCP<crs_matrix_type> A;
   if (!filename.empty()) {
     A = Tpetra::MatrixMarket::Reader<crs_matrix_type>::readSparseFile(filename, comm);
-  } else {
+  }
+  else if (use_galeri && !matrixName.empty()) {
+    A = my_helper::get_galeri_matrix<Node>(
+        matrixName,
+        nsize,
+        comm);
+  }
+  else {
     A = Tpetra::Utils::MatrixGenerator<crs_matrix_type>::generate_miniFE_matrix(nsize, comm);
   }
 
