@@ -27,6 +27,29 @@ template <class Node>
 using crs_matrix_type =
     Tpetra::CrsMatrix<Scalar, LO, GO, Node>;
 
+bool is_1d(const std::string& name)
+{
+    return name == "Laplace1D" ||
+           name == "Identity";
+}
+
+bool is_2d(const std::string& name)
+{
+    return name == "Laplace2D" ||
+           name == "Star2D" ||
+           name == "BigStar2D" ||
+           name == "AnisotropicDiffusion" ||
+           name == "Recirc2D";
+}
+
+bool is_3d(const std::string& name)
+{
+    return name == "Laplace3D" ||
+           name == "Brick3D" ||
+           name == "Scalar3D_27Pt" ||
+           name == "HexFEM_LapStiff" ||
+           name == "HexFEM_Mass";
+}
 
 /*
  * General overload.
@@ -95,51 +118,65 @@ get_galeri_matrix(
     const GO nsize,
     const Teuchos::RCP<const Teuchos::Comm<int>>& comm)
 {
-    Teuchos::ParameterList galeriList;
+  
+  using map_type =
+      Tpetra::Map<LO, GO, Node>;
+  
+  using matrix_type =
+      Tpetra::CrsMatrix<Scalar, LO, GO, Node>;
+  
+  using multivector_type =
+      Tpetra::MultiVector<Scalar, LO, GO, Node>;
+  
+  Teuchos::ParameterList params;
+  
+  GO nx = nsize;
+  GO ny = 1;
+  GO nz = 1;
+  
+  if (is_2d(matrixName)) {
+      ny = nsize;
+  }
+  else if (is_3d(matrixName)) {
+      ny = nsize;
+      nz = nsize;
+  }
+  
+  params.set("nx", nx);
+  
+  if (ny != 1)
+      params.set("ny", ny);
+  
+  if (nz != 1)
+      params.set("nz", nz);
+  
+  Tpetra::global_size_t N =
+      static_cast<Tpetra::global_size_t>(nx) *
+      static_cast<Tpetra::global_size_t>(ny) *
+      static_cast<Tpetra::global_size_t>(nz);
+  
+  auto map =
+      Teuchos::rcp(
+          new map_type(
+              N,
+              static_cast<GO>(0),
+              comm));
+  
+  auto problem =
+      Galeri::Xpetra::BuildProblem<
+          Scalar,
+          LO,
+          GO,
+          map_type,
+          matrix_type,
+          multivector_type>(
+              matrixName,
+              map,
+              params);
+  
+  auto A = problem->BuildMatrix();
 
-    galeriList.set("nx", nsize);
-
-    std::string mapType;
-
-    if (matrixName == "Laplace1D" ||
-        matrixName == "Identity")
-    {
-        mapType = "Cartesian1D";
-    }
-    else if (matrixName == "Laplace2D" ||
-             matrixName == "Star2D" ||
-             matrixName == "BigStar2D" ||
-             matrixName == "AnisotropicDiffusion" ||
-             matrixName == "Recirc2D")
-    {
-        galeriList.set("ny", nsize);
-
-        mapType = "Cartesian2D";
-    }
-    else if (matrixName == "Laplace3D" ||
-             matrixName == "Brick3D" ||
-             matrixName == "Scalar3D_27Pt" ||
-             matrixName == "HexFEM_LapStiff" ||
-             matrixName == "HexFEM_Mass")
-    {
-        galeriList.set("ny", nsize);
-        galeriList.set("nz", nsize);
-
-        mapType = "Cartesian3D";
-    }
-    else
-    {
-        throw std::invalid_argument(
-            "my_helper::get_galeri_matrix: "
-            "don't know which Galeri map to use for matrix \"" +
-            matrixName + "\"");
-    }
-
-    return get_galeri_matrix<Node>(
-        matrixName,
-        mapType,
-        galeriList,
-        comm);
+  return A;
 }
 
 } // namespace my_helper
