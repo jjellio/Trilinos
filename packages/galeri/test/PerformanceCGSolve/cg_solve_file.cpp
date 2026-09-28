@@ -82,8 +82,7 @@
 
 #include "GaleriHelper.hpp"
 
-bool use_galeri = true;
-std::string matrixName = "Brick3D";
+std::string matrixName = "miniFE";
 
 namespace CGParams {
 int nsize = 20;
@@ -909,19 +908,21 @@ int run() {
 
 
   RCP<crs_matrix_type> A;
+  
   if (!filename.empty()) {
-    A = Tpetra::MatrixMarket::Reader<crs_matrix_type>::readSparseFile(filename, comm);
+    A = Tpetra::MatrixMarket::Reader<crs_matrix_type>::readSparseFile(
+        filename, comm);
   }
-  else if (use_galeri && !matrixName.empty()) {
+  else if (matrixName == "miniFE") {
+    A = Tpetra::Utils::MatrixGenerator<crs_matrix_type>::
+        generate_miniFE_matrix(nsize, comm);
+  }
+  else {
     A = my_helper::get_galeri_matrix<Node>(
         matrixName,
         nsize,
         comm);
   }
-  else {
-    A = Tpetra::Utils::MatrixGenerator<crs_matrix_type>::generate_miniFE_matrix(nsize, comm);
-  }
-
   if (printMatrix) {
     RCP<Teuchos::FancyOStream> fos = Teuchos::fancyOStream(Teuchos::rcpFromRef(cout));
     A->describe(*fos, Teuchos::VERB_EXTREME);
@@ -935,18 +936,36 @@ int run() {
 
   RCP<const map_type> map = A->getRangeMap();
   RCP<vec_type> b;
+  
   if (nsize < 0) {
-    using reader_type = Tpetra::MatrixMarket::Reader<crs_matrix_type>;
-    b = reader_type::readVectorFile(filename_vector, map->getComm(), map);
-  } else {
-    using gen_type = Tpetra::Utils::MatrixGenerator<crs_matrix_type>;
-    b = gen_type::generate_miniFE_vector(nsize, map->getComm());
+    using reader_type =
+        Tpetra::MatrixMarket::Reader<crs_matrix_type>;
+  
+    b = reader_type::readVectorFile(
+        filename_vector,
+        map->getComm(),
+        map);
+  }
+  else if (matrixName == "miniFE") {
+    using gen_type =
+        Tpetra::Utils::MatrixGenerator<crs_matrix_type>;
+  
+    b = gen_type::generate_miniFE_vector(
+        nsize,
+        map->getComm());
+  }
+  else {
+    b = rcp(new vec_type(map));
+    b->putScalar(1.0);
   }
 
   const Tpetra::global_size_t ng = map->getGlobalNumElements();
   if (myRank == 0) {
+    std::cout << "Matrix = " << matrixName << std::endl;
     std::cout << "Global matrix size = " << ng << std::endl;
-    std::cout << "SpMV backend = " << (useVmm ? "CUDA VMM direct-address" : "Tpetra apply") << std::endl;
+    std::cout << "SpMV backend = "
+              << (useVmm ? "CUDA VMM direct-address" : "Tpetra apply")
+              << std::endl;
   }
 
   RCP<vec_type> x(new vec_type(A->getDomainMap()));
@@ -1084,6 +1103,8 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("numgpus", &numgpus, "Number of GPUs visible to this process.");
   cmdp.setOption("hostname", &hostname, "Override of hostname for PerfTest entry.");
   cmdp.setOption("testarchive", &testarchive, "Set filename for Performance Test archive.");
+  cmdp.setOption("matrixType", &matrixName,
+      "Matrix to generate: miniFE (default), or any supported Galeri matrix name.");
   cmdp.setOption("filename", &filename, "Filename for test matrix.");
   cmdp.setOption("filename_vector", &filename_vector, "Filename for test matrix vector.");
   cmdp.setOption("tolerance", &tolerance, "Relative residual tolerance used for solver.");
@@ -1148,4 +1169,5 @@ int main(int argc, char* argv[]) {
   Kokkos::finalize();
   return rc;
 }
+
 
