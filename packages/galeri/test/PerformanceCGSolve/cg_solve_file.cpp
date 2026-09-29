@@ -81,8 +81,12 @@
 #endif
 
 #include "GaleriHelper.hpp"
+#include "TpetraMatrixInfo.hpp"
+#include "TpetraMatrixReuseTransform.hpp"
 
 std::string matrixName = "miniFE";
+int reuse = -1;
+bool noReuse = false;
 
 namespace CGParams {
 int nsize = 20;
@@ -934,9 +938,32 @@ int run() {
     throw std::runtime_error("The matrix must have domain and range maps that are the same.");
   }
 
+  /* Galeri / miniFE / file creation ... */
+  
+  if (reuse >= 0) {
+      TpetraMatrixTools::ReuseTransformStats reuseStats;
+  
+      A = TpetraMatrixTools::limitReuse(
+          A,
+          reuse,
+          &reuseStats);
+  
+      if (myRank == 0) {
+          std::cout
+              << "Reuse transform:"
+              << " requested=" << reuseStats.requestedReuse
+              << " intrinsic-max=" << reuseStats.intrinsicMaxReuse
+              << " domain=" << reuseStats.originalDomainSize
+              << " -> " << reuseStats.transformedDomainSize
+              << " nnz=" << reuseStats.globalNnz
+              << std::endl;
+      }
+  }
+
+
   RCP<const map_type> map = A->getRangeMap();
   RCP<vec_type> b;
-  
+
   if (nsize < 0) {
     using reader_type =
         Tpetra::MatrixMarket::Reader<crs_matrix_type>;
@@ -967,6 +994,10 @@ int run() {
               << (useVmm ? "CUDA VMM direct-address" : "Tpetra apply")
               << std::endl;
   }
+
+  const auto access = TpetraMatrixInfo::analyzeAccessPattern(*A);
+
+  TpetraMatrixInfo::print(std::cout, access);
 
   RCP<vec_type> x(new vec_type(A->getDomainMap()));
 
@@ -1121,12 +1152,25 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("vmm-ipc", &vmmIpc,
                  "VMM IPC backend: posix (same OS) or fabric (NVL72/IMEX).");
 
+  cmdp.setOption(
+      "reuse",
+      &reuse,
+      "Maximum reuse of a synthetic X scalar; 0 means no reuse.");
+  
+  cmdp.setOption(
+      "no-reuse",
+      "allow-reuse",
+      &noReuse,
+      "Equivalent to --reuse=0.");
 #ifdef HAVE_TPETRA_INST_CUDA
   cmdp.setOption("cuda", "no-cuda", &useCuda, "Use Cuda node");
 #endif
 
   if (cmdp.parse(argc, argv) != Teuchos::CommandLineProcessor::PARSE_SUCCESSFUL) {
     return EXIT_FAILURE;
+  }
+  if (noReuse) {
+      reuse = 0;
   }
 
 #ifdef HAVE_TPETRA_INST_CUDA
