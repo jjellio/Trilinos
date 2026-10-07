@@ -1784,7 +1784,7 @@ class MatrixMarketWriter {
    *
    * @note On processes that are not the rank zero process, the stream is left uninitialized.
    */
-  static std::ofstream openOutFileOnRankZero(
+  static std::unique_ptr<std::ostream> openOutFileOnRankZero(
       const trcp_tcomm_t& comm,
       const std::string& filename, const int rank, const bool safe = true,
       const std::ios_base::openmode mode = std::ios_base::out);
@@ -2165,6 +2165,16 @@ using Writer = MatrixMarketWriter<typename SparseMatrixType::scalar_type,
                                   typename SparseMatrixType::local_ordinal_type,
                                   typename SparseMatrixType::global_ordinal_type,
                                   typename SparseMatrixType::node_type>;
+
+static constexpr bool
+supportsGzipOutput() noexcept
+{
+#ifdef HAVE_TPETRACORE_ZLIB
+  return true;
+#else
+  return false;
+#endif
+}
 
 }  // namespace MatrixMarket
 }  // namespace Tpetra

@@ -31,6 +31,9 @@ extern "C" {
 }
 #include "Tpetra_Distribution.hpp"
 
+// optional Zlib support for output
+#include "Tpetra_Details_GzipOStream.hpp"
+
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -38,6 +41,9 @@ extern "C" {
 #include <vector>
 #include <stdexcept>
 #include <numeric>
+
+// used for Zlib backed ofstream 
+#include <memory>
 
 namespace Tpetra {
 
@@ -4829,7 +4835,7 @@ void MatrixMarketWriter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeSparseF
 
   auto out = MatrixMarketWriter::openOutFileOnRankZero(comm, filename, myRank, true);
 
-  writeSparse(out, matrix, matrixName, matrixDescription, debug);
+  writeSparse(*out, matrix, matrixName, matrixDescription, debug);
   // We can rely on the destructor of the output stream to close
   // the file on scope exit, even if writeSparse() throws an
   // exception.
@@ -5404,7 +5410,7 @@ void MatrixMarketWriter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeSparseG
 
   auto out = MatrixMarketWriter::openOutFileOnRankZero(comm, filename, myRank, true);
 
-  writeSparseGraph(out, graph, graphName, graphDescription, debug);
+  writeSparseGraph(*out, graph, graphName, graphDescription, debug);
   // We can rely on the destructor of the output stream to close
   // the file on scope exit, even if writeSparseGraph() throws
   // an exception.
@@ -5459,7 +5465,7 @@ void MatrixMarketWriter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeDenseFi
 
   auto out = MatrixMarketWriter::openOutFileOnRankZero(comm, filename, myRank, true);
 
-  writeDense(out, X, matrixName, matrixDescription, err, dbg);
+  writeDense(*out, X, matrixName, matrixDescription, err, dbg);
   // We can rely on the destructor of the output stream to close
   // the file on scope exit, even if writeDense() throws an
   // exception.
@@ -5545,33 +5551,34 @@ void MatrixMarketWriter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeDense(s
   }
 }
 
-template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
-std::ofstream MatrixMarketWriter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::openOutFileOnRankZero(
-    const trcp_tcomm_t& comm,
-    const std::string& filename, const int rank, const bool safe,
-    const std::ios_base::openmode mode) {
-  // Placeholder for the output stream.
-  std::ofstream out;
 
-  // State that will make all ranks throw if the root rank wasn't able to open the stream (using @c int for broadcasting).
-  int all_should_stop = 0;
-
-  // Try to open the file and update the state.
-  if (rank == 0) {
-    out.open(filename, mode);
-    all_should_stop = !out && safe;
+template<class Scalar,
+         class LocalOrdinal,
+         class GlobalOrdinal,
+         class Node>
+std::unique_ptr<std::ostream>
+MatrixMarketWriter<Scalar,
+                   LocalOrdinal,
+                   GlobalOrdinal,
+                   Node>::
+openOutFileOnRankZero(
+    const Teuchos::RCP<const Teuchos::Comm<int>>& comm,
+    const std::string& filename,
+    const int rank,
+    const bool safe,
+    const std::ios_base::openmode mode)
+{
+  if (comm->getRank() == 0) {
+    return Tpetra::Details::
+        openMatrixMarketOutputStream(filename);
   }
 
-  // Broadcast the stream state and throw from all ranks if needed.
-  if (comm) Teuchos::broadcast(*comm, 0, &all_should_stop);
-
-  TEUCHOS_TEST_FOR_EXCEPTION(
-      all_should_stop,
-      std::runtime_error,
-      "Could not open output file '" + filename + "' on root rank 0.");
-
-  return out;
+  // Preserve the current semantics: nonzero ranks get
+  // an ostream object but do not open a file.
+  return std::unique_ptr<std::ostream>(
+      new std::ofstream());
 }
+
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void MatrixMarketWriter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeDenseHeader(std::ostream& out,
@@ -6769,7 +6776,7 @@ void MatrixMarketWriter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeMapFile
 
   auto out = MatrixMarketWriter::openOutFileOnRankZero(map.getComm(), filename, myRank, true);
 
-  writeMap(out, map);
+  writeMap(*out, map);
   // We can rely on the destructor of the output stream to close
   // the file on scope exit, even if writeDense() throws an
   // exception.
