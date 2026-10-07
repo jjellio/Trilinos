@@ -5,6 +5,7 @@
 #include <Teuchos_Array.hpp>
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_RCP.hpp>
+#include <Teuchos_OrdinalTraits.hpp>
 
 #include <Tpetra_CrsMatrix.hpp>
 #include <Tpetra_Distributor.hpp>
@@ -70,24 +71,6 @@ std::vector<Packet> distributorForward(Tpetra::Distributor& distributor,
                                                        imports.size());
 
   distributor.doPostsAndWaits(exportView, 1, importView);
-  return imports;
-}
-
-template <class Packet>
-std::vector<Packet> distributorReverse(Tpetra::Distributor& distributor,
-                                       const std::vector<Packet>& exports,
-                                       const std::size_t numImports) {
-  static_assert(std::is_trivially_copyable<Packet>::value,
-                "Distributor packet must be trivially copyable");
-
-  std::vector<Packet> imports(numImports);
-
-  Kokkos::View<const Packet*, Kokkos::HostSpace> exportView(
-      exports.data(), exports.size());
-  Kokkos::View<Packet*, Kokkos::HostSpace> importView(imports.data(),
-                                                       imports.size());
-
-  distributor.doReversePostsAndWaits(exportView, 1, importView);
   return imports;
 }
 
@@ -252,11 +235,13 @@ Teuchos::RCP<CrsMatrix> limitReuse(
   std::vector<GO> exportGids;
   std::vector<long long> exportCounts;
   std::vector<int> exportSources;
+  std::vector<long long> exportRequestIds;
 
   exportProcIDs.reserve(numLocalCols);
   exportGids.reserve(numLocalCols);
   exportCounts.reserve(numLocalCols);
   exportSources.reserve(numLocalCols);
+  exportRequestIds.reserve(numLocalCols);
 
   const std::size_t noRequest = std::numeric_limits<std::size_t>::max();
   std::vector<std::size_t> requestIndexByColLid(numLocalCols, noRequest);
@@ -273,10 +258,17 @@ Teuchos::RCP<CrsMatrix> limitReuse(
     const std::size_t requestIndex = exportGids.size();
     requestIndexByColLid[lid] = requestIndex;
 
+    if (requestIndex >
+        static_cast<std::size_t>(std::numeric_limits<long long>::max())) {
+      throw std::overflow_error(
+          "TpetraMatrixTools::limitReuse request index exceeds long long");
+    }
+
     exportProcIDs.push_back(owner);
     exportGids.push_back(colGids[lid]);
     exportCounts.push_back(localUseCount[lid]);
     exportSources.push_back(rank);
+    exportRequestIds.push_back(static_cast<long long>(requestIndex));
   }
 
   // -----------------------------------------------------------------------
@@ -291,6 +283,8 @@ Teuchos::RCP<CrsMatrix> limitReuse(
       detail::distributorForward(distributor, exportCounts, numImports);
   const std::vector<int> importSources =
       detail::distributorForward(distributor, exportSources, numImports);
+  const std::vector<long long> importRequestIds =
+      detail::distributorForward(distributor, exportRequestIds, numImports);
 
   // Every imported GID must be locally owned in the original domain Map.
   const std::size_t localDomainSize = domainMap->getLocalNumElements();
@@ -490,20 +484,78 @@ Teuchos::RCP<CrsMatrix> limitReuse(
   localStats.transformedDomainSize = globalSyntheticCountTpetra;
 
   // -----------------------------------------------------------------------
-  // 6. Return owner assignments to the source ranks.  Reverse Distributor
-  //    communication preserves the original export-request ordering.
+  // 6. Return owner assignments to the source ranks.
+  //
+  // Do not rely on Distributor reverse-order semantics here.  Each request
+  // carries an explicit source-local request ID; the owner sends that ID back
+  // with the assignment, and the source places the response by ID.
   // -----------------------------------------------------------------------
-  const std::vector<long long> exportOccurrencePrefix =
-      detail::distributorReverse(distributor, responseOccurrencePrefix,
-                                 exportGids.size());
-  const std::vector<long long> exportCloneBaseLocal =
-      detail::distributorReverse(distributor, responseCloneBaseLocal,
-                                 exportGids.size());
+  Array<int> responseProcIDs;
+  std::vector<long long> responseRequestIds;
+  responseProcIDs.reserve(numImports);
+  responseRequestIds.reserve(numImports);
 
-  if (exportOccurrencePrefix.size() != exportGids.size() ||
-      exportCloneBaseLocal.size() != exportGids.size()) {
+  for (std::size_t i = 0; i < numImports; ++i) {
+    const int source = importSources[i];
+    if (source < 0 || source >= numRanks) {
+      throw std::runtime_error(
+          "TpetraMatrixTools::limitReuse received an invalid source rank");
+    }
+    responseProcIDs.push_back(source);
+    responseRequestIds.push_back(importRequestIds[i]);
+  }
+
+  Tpetra::Distributor responseDistributor(comm);
+  const std::size_t numResponses =
+      responseDistributor.createFromSends(responseProcIDs());
+
+  const std::vector<long long> receivedRequestIds =
+      detail::distributorForward(responseDistributor, responseRequestIds,
+                                 numResponses);
+  const std::vector<long long> receivedOccurrencePrefix =
+      detail::distributorForward(responseDistributor,
+                                 responseOccurrencePrefix, numResponses);
+  const std::vector<long long> receivedCloneBaseLocal =
+      detail::distributorForward(responseDistributor,
+                                 responseCloneBaseLocal, numResponses);
+
+  if (numResponses != exportGids.size()) {
     throw std::runtime_error(
-        "TpetraMatrixTools::limitReuse reverse Distributor size mismatch");
+        "TpetraMatrixTools::limitReuse response count does not match "
+        "the number of source requests");
+  }
+
+  std::vector<long long> exportOccurrencePrefix(exportGids.size(), -1);
+  std::vector<long long> exportCloneBaseLocal(exportGids.size(), -1);
+  std::vector<unsigned char> responseSeen(exportGids.size(), 0);
+
+  for (std::size_t i = 0; i < numResponses; ++i) {
+    const long long requestIdLL = receivedRequestIds[i];
+    if (requestIdLL < 0 ||
+        static_cast<unsigned long long>(requestIdLL) >=
+            static_cast<unsigned long long>(exportGids.size())) {
+      throw std::runtime_error(
+          "TpetraMatrixTools::limitReuse received an invalid request ID");
+    }
+
+    const std::size_t requestId = static_cast<std::size_t>(requestIdLL);
+    if (responseSeen[requestId] != 0) {
+      throw std::runtime_error(
+          "TpetraMatrixTools::limitReuse received a duplicate response ID");
+    }
+
+    responseSeen[requestId] = 1;
+    exportOccurrencePrefix[requestId] = receivedOccurrencePrefix[i];
+    exportCloneBaseLocal[requestId] = receivedCloneBaseLocal[i];
+  }
+
+  for (std::size_t requestId = 0; requestId < responseSeen.size();
+       ++requestId) {
+    if (responseSeen[requestId] == 0) {
+      throw std::runtime_error(
+          "TpetraMatrixTools::limitReuse did not receive every assignment "
+          "response");
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -573,6 +625,38 @@ Teuchos::RCP<CrsMatrix> limitReuse(
   }
 
   B->fillComplete(newDomainMap, rangeMap);
+
+  // Validate that every synthetic column GID actually belongs to the
+  // synthetic domain Map.  This catches numbering/communication bugs here,
+  // before a downstream analyzer or SpMV sees an inconsistent operator.
+  {
+    const auto newColMap = B->getColMap();
+    const auto newColGidList = newColMap->getLocalElementList();
+    Array<GO> newColGids(newColGidList.size());
+    Array<int> newColOwners(newColGidList.size());
+    std::fill(newColOwners.begin(), newColOwners.end(), -1);
+
+    for (std::size_t lid = 0; lid < newColGidList.size(); ++lid) {
+      newColGids[lid] = newColGidList[lid];
+    }
+
+    const Tpetra::LookupStatus transformedLookup =
+        newDomainMap->getRemoteIndexList(newColGids(), newColOwners());
+
+    if (transformedLookup != Tpetra::AllIDsPresent) {
+      GO missingGid = Teuchos::OrdinalTraits<GO>::invalid();
+      for (std::size_t lid = 0; lid < newColOwners.size(); ++lid) {
+        if (newColOwners[lid] < 0) {
+          missingGid = newColGids[lid];
+          break;
+        }
+      }
+      throw std::runtime_error(
+          "TpetraMatrixTools::limitReuse generated a synthetic column GID "
+          "that is absent from the synthetic domain Map; first missing GID=" +
+          std::to_string(static_cast<long long>(missingGid)));
+    }
+  }
 
   if (B->getGlobalNumEntries() != A->getGlobalNumEntries()) {
     throw std::runtime_error(

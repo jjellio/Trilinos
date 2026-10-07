@@ -8,10 +8,12 @@
 #include <Teuchos_ParameterList.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <Tpetra_Access.hpp>
 #include <Tpetra_CrsMatrix.hpp>
 #include <Tpetra_Map.hpp>
 #include <Tpetra_MultiVector.hpp>
 #include <Tpetra_Vector.hpp>
+#include <MatrixMarket_Tpetra.hpp>
 
 #include <Galeri_XpetraMatrixTypes.hpp>
 #include <Galeri_XpetraProblemFactory.hpp>
@@ -129,6 +131,95 @@ make_contiguous_dof_map(
 }
 
 /*
+ * Build exact logical labels for the matrix GIDs.
+ *
+ * Each row of the returned MultiVector contains
+ *
+ *   [ gid, ix, iy, iz, component ]
+ *
+ * where unused spatial dimensions are zero.  For scalar matrices component
+ * is always zero.  For elasticity, consecutive matrix GIDs are the point
+ * DOFs belonging to the same mesh node.
+ *
+ * Because this helper constructs a zero-based contiguous Galeri map, these
+ * labels provide the semantic mapping needed to compare a Matrix Market dump
+ * against an independently generated matrix, regardless of that generator's
+ * row/column ordering.
+ */
+template <class Node>
+Teuchos::RCP<Tpetra::MultiVector<Scalar, LO, GO, Node>>
+make_logical_labels(
+    const Teuchos::RCP<const Tpetra::Map<LO, GO, Node>>& map,
+    const GO nx,
+    const GO ny,
+    const int dofsPerNode)
+{
+    using multivector_type = Tpetra::MultiVector<Scalar, LO, GO, Node>;
+
+    constexpr std::size_t numLabelColumns = 5;
+    Teuchos::RCP<multivector_type> labels =
+        Teuchos::rcp(new multivector_type(map, numLabelColumns));
+
+    auto view = labels->getLocalViewHost(Tpetra::Access::OverwriteAll);
+    const GO dofs = static_cast<GO>(dofsPerNode);
+
+    const std::size_t localSize = map->getLocalNumElements();
+    for (std::size_t k = 0; k < localSize; ++k) {
+        const LO lid = static_cast<LO>(k);
+        const GO gid = map->getGlobalElement(lid);
+
+        const GO nodeGid = gid / dofs;
+        const GO component = gid % dofs;
+
+        const GO ix = nodeGid % nx;
+        const GO iy = (nodeGid / nx) % ny;
+        const GO iz = nodeGid / (nx * ny);
+
+        view(lid, 0) = static_cast<Scalar>(gid);
+        view(lid, 1) = static_cast<Scalar>(ix);
+        view(lid, 2) = static_cast<Scalar>(iy);
+        view(lid, 3) = static_cast<Scalar>(iz);
+        view(lid, 4) = static_cast<Scalar>(component);
+    }
+
+    return labels;
+}
+
+/*
+ * Optional validation output.
+ *
+ * <prefix>.mtx         : sparse Galeri matrix
+ * <prefix>.logical.mtx : dense N x 5 logical labels [gid ix iy iz component]
+ *
+ * MatrixMarket::Writer handles gathering the distributed Tpetra objects for
+ * this diagnostic output.  This is intentionally not intended as scalable I/O.
+ */
+template <class Node>
+void write_galeri_validation_files(
+    const std::string& prefix,
+    const Teuchos::RCP<crs_matrix_type<Node>>& A,
+    const GO nx,
+    const GO ny,
+    const int dofsPerNode)
+{
+    if (prefix.empty()) {
+        return;
+    }
+
+    using matrix_type = crs_matrix_type<Node>;
+    using writer_type = Tpetra::MatrixMarket::Writer<matrix_type>;
+
+    const std::string suffix =
+        Tpetra::MatrixMarket::supportsGzipOutput() ? ".mtx.gz" : ".mtx";
+
+    writer_type::writeSparseFile(prefix + suffix, A);
+
+    auto labels = make_logical_labels<Node>(
+        A->getRowMap(), nx, ny, dofsPerNode);
+    writer_type::writeDenseFile(prefix + ".logical" + suffix, labels);
+}
+
+/*
  * General contiguous-map overload.
  *
  * The caller supplies Galeri parameters such as nx, ny, nz, stretch*, E, nu,
@@ -149,7 +240,8 @@ Teuchos::RCP<crs_matrix_type<Node>>
 get_galeri_matrix(
     const std::string& matrixType,
     Teuchos::ParameterList params,
-    const Teuchos::RCP<const Teuchos::Comm<int>>& comm)
+    const Teuchos::RCP<const Teuchos::Comm<int>>& comm,
+    const std::string& savePrefix = "")
 {
     using map_type = Tpetra::Map<LO, GO, Node>;
     using matrix_type = Tpetra::CrsMatrix<Scalar, LO, GO, Node>;
@@ -216,6 +308,14 @@ get_galeri_matrix(
 
     Teuchos::RCP<matrix_type> A = problem->BuildMatrix();
 
+    if (! savePrefix.empty() ){
+        std::ostringstream oss;
+        oss << savePrefix << matrixType << "_" << nx << "x" << ny << "x" << nz;
+    
+        write_galeri_validation_files<Node>(
+            oss.str(), A, nx, ny, dofsPerNode);
+    }
+
     return A;
 }
 
@@ -237,7 +337,8 @@ Teuchos::RCP<crs_matrix_type<Node>>
 get_galeri_matrix(
     const std::string& matrixType,
     const GO nsize,
-    const Teuchos::RCP<const Teuchos::Comm<int>>& comm)
+    const Teuchos::RCP<const Teuchos::Comm<int>>& comm,
+    const std::string& savePrefix = "")
 {
     if (nsize <= 0) {
         throw std::invalid_argument(
@@ -256,8 +357,9 @@ get_galeri_matrix(
         params.set("nz", nsize);
     }
 
-    return get_galeri_matrix<Node>(matrixType, params, comm);
+    return get_galeri_matrix<Node>(matrixType, params, comm, savePrefix);
 }
 
 }  // namespace my_helper
+
 

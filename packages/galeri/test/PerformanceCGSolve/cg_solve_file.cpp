@@ -87,6 +87,8 @@
 std::string matrixName = "miniFE";
 int reuse = -1;
 bool noReuse = false;
+std::string saveGaleri = "";
+
 
 namespace CGParams {
 int nsize = 20;
@@ -103,6 +105,7 @@ double tol_large = 0.10;
 
 bool useVmm = false;
 bool validateVmm = true;
+bool spmvOnly = false;
 std::string vmmIpc = "posix";  // posix on current H200/HGX node, fabric on NVL72/IMEX
 }  // namespace CGParams
 
@@ -925,7 +928,8 @@ int run() {
     A = my_helper::get_galeri_matrix<Node>(
         matrixName,
         nsize,
-        comm);
+        comm,
+        saveGaleri);
   }
   if (printMatrix) {
     RCP<Teuchos::FancyOStream> fos = Teuchos::fancyOStream(Teuchos::rcpFromRef(cout));
@@ -934,12 +938,7 @@ int run() {
     cout << endl << A->description() << endl << endl;
   }
 
-  if (!A->getRangeMap()->isSameAs(*(A->getDomainMap()))) {
-    throw std::runtime_error("The matrix must have domain and range maps that are the same.");
-  }
-
-  /* Galeri / miniFE / file creation ... */
-  
+  /* Optional synthetic reuse transform. */
   if (reuse >= 0) {
       TpetraMatrixTools::ReuseTransformStats reuseStats;
   
@@ -961,45 +960,78 @@ int run() {
   }
 
 
-  RCP<const map_type> map = A->getRangeMap();
+  RCP<const map_type> domainMap = A->getDomainMap();
+  RCP<const map_type> rangeMap  = A->getRangeMap();
+  const bool square = rangeMap->isSameAs(*domainMap);
+
+  if (!spmvOnly && !square) {
+    throw std::runtime_error(
+        "CG requires identical domain and range Maps. "
+        "The matrix is rectangular; use --spmv-only.");
+  }
+
+  // Keep CG vectors and pure-SpMV vectors distinct.  A reuse-transformed
+  // matrix may be rectangular:
+  //
+  //   A : range x domain
+  //   x : domain
+  //   y : range
   RCP<vec_type> b;
+  RCP<vec_type> x;
+  RCP<vec_type> spmvX;
+  RCP<vec_type> spmvY;
 
-  if (nsize < 0) {
-    using reader_type =
-        Tpetra::MatrixMarket::Reader<crs_matrix_type>;
-  
-    b = reader_type::readVectorFile(
-        filename_vector,
-        map->getComm(),
-        map);
-  }
-  else if (matrixName == "miniFE") {
-    using gen_type =
-        Tpetra::Utils::MatrixGenerator<crs_matrix_type>;
-  
-    b = gen_type::generate_miniFE_vector(
-        nsize,
-        map->getComm());
-  }
-  else {
-    b = rcp(new vec_type(map));
-    b->putScalar(1.0);
+  if (spmvOnly) {
+    spmvX = rcp(new vec_type(domainMap));
+    spmvY = rcp(new vec_type(rangeMap));
+    spmvX->putScalar(static_cast<Scalar>(1.0));
+    spmvY->putScalar(static_cast<Scalar>(0.0));
+  } else {
+    if (nsize < 0) {
+      using reader_type =
+          Tpetra::MatrixMarket::Reader<crs_matrix_type>;
+
+      b = reader_type::readVectorFile(
+          filename_vector,
+          rangeMap->getComm(),
+          rangeMap);
+    }
+    else if (matrixName == "miniFE") {
+      using gen_type =
+          Tpetra::Utils::MatrixGenerator<crs_matrix_type>;
+
+      b = gen_type::generate_miniFE_vector(
+          nsize,
+          rangeMap->getComm());
+    }
+    else {
+      b = rcp(new vec_type(rangeMap));
+      b->putScalar(1.0);
+    }
+
+    x = rcp(new vec_type(domainMap));
   }
 
-  const Tpetra::global_size_t ng = map->getGlobalNumElements();
+  const Tpetra::global_size_t globalRows =
+      rangeMap->getGlobalNumElements();
+  const Tpetra::global_size_t globalCols =
+      domainMap->getGlobalNumElements();
+
   if (myRank == 0) {
     std::cout << "Matrix = " << matrixName << std::endl;
-    std::cout << "Global matrix size = " << ng << std::endl;
+    // Preserve this line for the existing sweep parser.
+    std::cout << "Global matrix size = " << globalRows << std::endl;
+    std::cout << "Global matrix shape = "
+              << globalRows << " x " << globalCols << std::endl;
+    std::cout << "Execution mode = "
+              << (spmvOnly ? "SpMV only" : "CG") << std::endl;
     std::cout << "SpMV backend = "
               << (useVmm ? "CUDA VMM direct-address" : "Tpetra apply")
               << std::endl;
   }
 
   const auto access = TpetraMatrixInfo::analyzeAccessPattern(*A);
-
   TpetraMatrixInfo::print(std::cout, access);
-
-  RCP<vec_type> x(new vec_type(A->getDomainMap()));
 
 #ifdef HAVE_TPETRA_INST_CUDA
   std::unique_ptr<VmmExperiment::VmmSpmvContext<crs_matrix_type, vec_type>> vmm;
@@ -1016,8 +1048,9 @@ int run() {
       auto yVmm = Tpetra::createVector<Scalar>(A->getRangeMap());
       auto diff = Tpetra::createVector<Scalar>(A->getRangeMap());
 
-      A->apply(*b, *yRef);
-      vmm->apply(*b, *yVmm);
+      const RCP<vec_type>& validationX = spmvOnly ? spmvX : b;
+      A->apply(*validationX, *yRef);
+      vmm->apply(*validationX, *yVmm);
       Tpetra::deep_copy(*diff, *yVmm);
       diff->update(-1.0, *yRef, 1.0);
       const auto err = diff->norm2();
@@ -1039,34 +1072,59 @@ int run() {
 
   // Untimed warm-up apply using the selected backend.
 #ifdef HAVE_TPETRA_INST_CUDA
-  if (vmm) vmm->apply(*b, *x);
-  else A->apply(*b, *x);
+  if (spmvOnly) {
+    if (vmm) vmm->apply(*spmvX, *spmvY);
+    else A->apply(*spmvX, *spmvY);
+  } else {
+    if (vmm) vmm->apply(*b, *x);
+    else A->apply(*b, *x);
+  }
 #else
-  A->apply(*b, *x);
+  if (spmvOnly) A->apply(*spmvX, *spmvY);
+  else A->apply(*b, *x);
 #endif
 
-
-Kokkos::fence("warmup complete");
-x->putScalar(0);
-Kokkos::fence("x reset complete");
+  Kokkos::fence("warmup complete");
+  if (spmvOnly) {
+    spmvY->putScalar(0);
+  } else {
+    x->putScalar(0);
+  }
+  Kokkos::fence("post-warmup reset complete");
 
 // Align the starting line.
 MPI_Barrier(MPI_COMM_WORLD);
 
 // you must start a stacked timer somewhere...
-RCP<StackedTimer> timer = rcp(new StackedTimer("CG: global"));
+RCP<StackedTimer> timer = rcp(new StackedTimer(spmvOnly ? "SpMV: global" : "CG: global"));
 TimeMonitor::setStackedTimer(timer);
 
 const double t0 = MPI_Wtime();
 
-  const bool success = cg_solve(A, b, x, myRank, tolerance, niters
-#ifdef HAVE_TPETRA_INST_CUDA
-                                , vmm.get()
-#endif
-                                );
+  bool success = true;
 
-// Define solver completion as device work completed.
-Kokkos::fence("CG completion");
+  if (spmvOnly) {
+    for (int iter = 0; iter < niters; ++iter) {
+      applyCgOperator(
+          A,
+          spmvX,
+          spmvY
+#ifdef HAVE_TPETRA_INST_CUDA
+          , vmm.get()
+#endif
+      );
+    }
+  } else {
+    success = cg_solve(
+        A, b, x, myRank, tolerance, niters
+#ifdef HAVE_TPETRA_INST_CUDA
+        , vmm.get()
+#endif
+    );
+  }
+
+// Define benchmark completion as device work completed.
+Kokkos::fence(spmvOnly ? "SpMV completion" : "CG completion");
 
 const double local_elapsed = MPI_Wtime() - t0;
 
@@ -1090,14 +1148,22 @@ MPI_Reduce(&local_elapsed,
   options.output_fraction = options.output_histogram = options.output_minmax = true;
   timer->report(std::cout, comm, options);
 
-  const std::string testBaseName = std::string("Tpetra CGSolve ") +
+  const std::string testBaseName =
+      std::string(spmvOnly ? "Tpetra SpMV " : "Tpetra CGSolve ") +
       (useVmm ? "VMM " : "") +
       (Tpetra::Details::Behavior::cudaLaunchBlocking() ? "CUDA_LAUNCH_BLOCKING " : "");
-  auto xmlOut = timer->reportWatchrXML(testBaseName + std::to_string(comm->getSize()) + " ranks", comm);
+  auto xmlOut = timer->reportWatchrXML(
+      testBaseName + std::to_string(comm->getSize()) + " ranks", comm);
 
   if (myRank == 0) {
-    std::cout << "CG Solve Critical Max Time: " << std::setprecision(std::numeric_limits<double>::max_digits10) << critical_elapsed << "\n";
-    if (xmlOut.length()) std::cout << "\nAlso created Watchr performance report " << xmlOut << '\n';
+    std::cout
+        << (spmvOnly ? "SpMV Critical Max Time: " : "CG Solve Critical Max Time: ")
+        << std::setprecision(std::numeric_limits<double>::max_digits10)
+        << critical_elapsed << "\n";
+    if (xmlOut.length()) {
+      std::cout << "\nAlso created Watchr performance report "
+                << xmlOut << '\n';
+    }
     if (success) std::cout << "End Result: TEST PASSED\n";
     else std::cout << "End Result: TEST FAILED\n";
   }
@@ -1139,7 +1205,10 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("filename", &filename, "Filename for test matrix.");
   cmdp.setOption("filename_vector", &filename_vector, "Filename for test matrix vector.");
   cmdp.setOption("tolerance", &tolerance, "Relative residual tolerance used for solver.");
-  cmdp.setOption("iterations", &niters, "Maximum number of iterations.");
+  cmdp.setOption("iterations", &niters, "Maximum number of iterations / SpMV repetitions.");
+  cmdp.setOption(
+      "spmv-only", "cg", &spmvOnly,
+      "Run exactly --iterations SpMVs instead of CG; supports rectangular matrices.");
   cmdp.setOption("printMatrix", "noPrintMatrix", &printMatrix,
                  "Print the full matrix after reading it.");
   cmdp.setOption("size", &nsize, "Generate miniFE matrix with X^3 elements.");
@@ -1162,6 +1231,13 @@ int main(int argc, char* argv[]) {
       "allow-reuse",
       &noReuse,
       "Equivalent to --reuse=0.");
+
+  cmdp.setOption(
+      "saveGaleri",
+      &saveGaleri,
+      "If nonempty, write <prefix>.mtx and "
+      "<prefix>.logical.mtx for Galeri validation");
+
 #ifdef HAVE_TPETRA_INST_CUDA
   cmdp.setOption("cuda", "no-cuda", &useCuda, "Use Cuda node");
 #endif
