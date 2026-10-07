@@ -6,57 +6,29 @@ TRIBITS_SET_AND_INC_DIRS(DIR ${CMAKE_CURRENT_SOURCE_DIR})
 IF(Tpetra_INST_DOUBLE)
   MESSAGE(STATUS "Tpetra: Performance-CGSolve test ENABLED")
 
-  # This test makes sense only for Scalar == double
+  if (KokkosKernels_ENABLE_TPL_CUSPARSE)
+    set(CG_SOLVE_VARIANT "cusparse")
+  else()
+    set(CG_SOLVE_VARIANT "NOcusparse")
+  endif()
+
   TRIBITS_ADD_EXECUTABLE(
-    Performance-CGSolve
+    Performance-CGSolve-orig
+    NOEXEPREFIX
+    NOEXESUFFIX
     SOURCES cg_solve_file.cpp
     COMM mpi
     CATEGORIES BASIC PERFORMANCE
+    ADDED_EXE_TARGET_NAME_OUT CG_SOLVE_TARGET
   )
 
-  SET(COUNTER 1)
-  SET(MAX_COUNT 11)
-
-  WHILE(COUNTER LESS MAX_COUNT)
-    MATH(EXPR NP "${COUNTER} * ${COUNTER}")
-
-    TRIBITS_ADD_TEST(
-      Performance-CGSolve
-      NAME Performance_StrongScaling_CGSolve
-      ARGS "--size=200"
-      COMM mpi
-      NUM_MPI_PROCS ${NP}
-      STANDARD_PASS_OUTPUT
-      RUN_SERIAL
-      CATEGORIES PERFORMANCE
+  if (CG_SOLVE_TARGET)
+    set_target_properties(
+      ${CG_SOLVE_TARGET}
+      PROPERTIES
+        OUTPUT_NAME "${CG_SOLVE_TARGET}.exe+${CG_SOLVE_VARIANT}"
     )
+  endif()
 
-    MATH(EXPR COUNTER "${COUNTER} + 1")
-  ENDWHILE()
-
-  IF(Tpetra_ENABLE_CUDA)
-    MESSAGE(STATUS "Tpetra: Performance-CGSolve CUDA_LAUNCH_BLOCKING test ENABLED")
-    SET(COUNTER 1)
-    SET(MAX_COUNT 11)
-
-    WHILE(COUNTER LESS MAX_COUNT)
-      MATH(EXPR NP "${COUNTER} * ${COUNTER}")
-
-      TRIBITS_ADD_TEST(
-        Performance-CGSolve
-        NAME Performance_StrongScaling_CGSolve_CUDA_LAUNCH_BLOCKING
-        ARGS "--size=200"
-        COMM mpi
-        NUM_MPI_PROCS ${NP}
-        ENVIRONMENT CUDA_LAUNCH_BLOCKING=1
-        STANDARD_PASS_OUTPUT
-        RUN_SERIAL
-        CATEGORIES PERFORMANCE
-      )
-
-      MATH(EXPR COUNTER "${COUNTER} + 1")
-    ENDWHILE()
-
-  ENDIF()
 
 ENDIF()
