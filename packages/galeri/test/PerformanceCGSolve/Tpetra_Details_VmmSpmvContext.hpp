@@ -9,6 +9,7 @@
 #include "Tpetra_Details_VmmDistributedArena.hpp"
 #include "Tpetra_CrsMatrix_fwd.hpp"
 #include "Tpetra_MultiVector.hpp"
+#include "KokkosSparse_CrsMatrix.hpp"
 #include "KokkosSparse_spmv.hpp"
 #include <limits>
 #include <type_traits>
@@ -28,6 +29,15 @@ class VmmSpmvContext {
   using device_type = typename local_matrix_type::device_type;
   using memory_space = typename device_type::memory_space;
   using entries_type = typename local_matrix_type::index_type::non_const_type;
+
+  // Do not retain managed Kokkos views into Tpetra's WrappedDualView storage.
+  // The source matrix owns its row pointers and values; VMM borrows them.
+  using unmanaged_matrix_type = KokkosSparse::CrsMatrix<
+      typename local_matrix_type::value_type,
+      typename local_matrix_type::ordinal_type,
+      device_type,
+      Kokkos::MemoryTraits<Kokkos::Unmanaged>,
+      typename local_matrix_type::size_type>;
   using unmanaged_vector_type =
       Kokkos::View<impl_scalar_type*, device_type, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
@@ -36,8 +46,7 @@ class VmmSpmvContext {
 
   VmmSpmvContext(const matrix_type& A, IpcMode ipcMode)
       : comm_(A.getDomainMap()->getComm()),
-        arena_(A.getDomainMap()->getLocalNumElements(), ipcMode, comm_),
-        localA_(A.getLocalMatrixDevice()) {
+        arena_(A.getDomainMap()->getLocalNumElements(), ipcMode, comm_) {
     rank_ = comm_.rank();
     size_ = comm_.size();
     buildAddressedMatrix(A);
@@ -58,6 +67,7 @@ class VmmSpmvContext {
     Kokkos::deep_copy(xLocal_, x1d);
     Kokkos::fence("VMM publish local X fence");
 #ifdef HAVE_MPI
+    #pragma message("HAVE MPI")
     // Establish a simple global epoch: all owner writes are complete before any
     // rank starts ordinary remote loads.  This is intentionally conservative.
     MPI_Barrier(comm_.mpi());
@@ -151,11 +161,15 @@ class VmmSpmvContext {
       colLidToVmm[lid] = static_cast<LO>(addressOrdinal);
     }
 
-    const std::size_t nnz = localA_.nnz();
+    // Acquire managed Tpetra views only for the duration of this method.
+    // They are released on return, so subsequent getLocalMatrixHost() calls
+    // do not encounter a permanently live view of CrsGraph::lclInds.
+    const auto localA = A.getLocalMatrixDevice();
+    const std::size_t nnz = localA.nnz();
     vmmEntries_ = entries_type("VMM direct column ordinals", nnz);
 
     auto entriesHost = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                                                            localA_.graph.entries);
+                                                            localA.graph.entries);
     auto vmmEntriesHost = Kokkos::create_mirror_view(vmmEntries_);
     for (std::size_t k = 0; k < nnz; ++k) {
       const LO colLid = entriesHost(k);
@@ -167,11 +181,24 @@ class VmmSpmvContext {
     Kokkos::deep_copy(vmmEntries_, vmmEntriesHost);
     Kokkos::fence("build VMM column ordinals");
 
-    const LO numRows = static_cast<LO>(localA_.numRows());
+    const LO numRows = static_cast<LO>(localA.numRows());
     const LO numCols = static_cast<LO>(arena_.totalElements());
-    vmmA_ = local_matrix_type("VMM addressed local matrix",
-                              numRows, numCols, localA_.nnz(),
-                              localA_.values, localA_.graph.row_map, vmmEntries_);
+
+    // The VMM matrix contains only UNMANAGED views.  Construct each view
+    // from a raw pointer, not by copying managed views from localA.  The
+    // translated column indices are allocated and owned by vmmEntries_.
+    // The original row offsets and values remain owned by the CrsMatrix.
+    using values_view = typename unmanaged_matrix_type::values_type;
+    using row_map_view = typename unmanaged_matrix_type::row_map_type;
+    using indices_view = typename unmanaged_matrix_type::index_type;
+    const values_view values(localA.values.data(), localA.values.extent(0));
+    const row_map_view rowMap(localA.graph.row_map.data(),
+                              localA.graph.row_map.extent(0));
+    const indices_view indices(vmmEntries_.data(), vmmEntries_.extent(0));
+
+    vmmA_ = unmanaged_matrix_type("VMM addressed local matrix",
+                                  numRows, numCols, nnz,
+                                  values, rowMap, indices);
 
     if (rank_ == 0) {
       std::cout << "VMM CRS translation: reusing Tpetra row_map + values; "
@@ -182,9 +209,8 @@ class VmmSpmvContext {
 
   VmmComm comm_;
   DistributedVmmArena<impl_scalar_type> arena_;
-  local_matrix_type localA_;
   entries_type vmmEntries_;
-  local_matrix_type vmmA_;
+  unmanaged_matrix_type vmmA_;
   unmanaged_vector_type xGlobal_;
   unmanaged_vector_type xLocal_;
   int rank_ = 0;
@@ -195,4 +221,5 @@ class VmmSpmvContext {
 
 #endif  // HAVE_TPETRA_INST_CUDA
 #endif  // TPETRA_EXPERIMENT_VMM_SPMV_CONTEXT_HPP
+
 

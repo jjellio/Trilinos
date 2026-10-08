@@ -306,6 +306,19 @@ class Behavior {
   /// <tt>TPETRA_USE_NEW_COPY_AND_PERMUTE</tt> environment variable.
   static bool useNewCopyAndPermute();
 
+  /// \brief Enable the experimental CUDA VMM SpMV path in CrsMatrix.
+  ///
+  /// Controlled by TPETRA_EXPERIMENTAL_VMM; disabled by default.
+  /// This setting alone does not enable VMM if Tpetra lacks the
+  /// experimental VMM implementation.
+  static bool experimentalVmm();
+
+  /// \brief CUDA VMM interprocess sharing mechanism.
+  ///
+  /// Controlled by TPETRA_EXPERIMENTAL_VMM_IPC; defaults to "posix".
+  /// The VMM code interprets this value (currently "posix" or "fabric").
+  static std::string experimentalVmmIpc();
+
   /// \brief Warn if more than this many Kokkos spaces are accessed.
   ///
   /// This is disabled by default.  You may control this at run time via the
@@ -320,3 +333,4 @@ class Behavior {
 }  // namespace Tpetra
 
 #endif  // TPETRA_DETAILS_BEHAVIOR_HPP
+

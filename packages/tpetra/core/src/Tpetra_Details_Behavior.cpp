@@ -107,6 +107,8 @@ constexpr const std::string_view TIME_KOKKOS_FENCE = "TPETRA_TIME_KOKKOS_FENCE";
 constexpr const std::string_view TIME_KOKKOS_FUNCTIONS =
     "TPETRA_TIME_KOKKOS_FUNCTIONS";
 constexpr const std::string_view USE_NEW_COPY_AND_PERMUTE = "TPETRA_USE_NEW_COPY_AND_PERMUTE";
+constexpr const std::string_view EXPERIMENTAL_VMM = "TPETRA_EXPERIMENTAL_VMM";
+constexpr const std::string_view EXPERIMENTAL_VMM_IPC = "TPETRA_EXPERIMENTAL_VMM_IPC";
 
 // construct an std::array of string_view with any number of provided
 // string_views
@@ -126,7 +128,7 @@ constexpr const auto RECOGNIZED_VARS = make_array(
     DEFAULT_SEND_TYPE, GRANULAR_TRANSFERS,
     SPACES_ID_WARN_LIMIT, TIME_KOKKOS_DEEP_COPY, TIME_KOKKOS_DEEP_COPY_VERBOSE1,
     TIME_KOKKOS_DEEP_COPY_VERBOSE2, TIME_KOKKOS_FENCE, TIME_KOKKOS_FUNCTIONS,
-    USE_NEW_COPY_AND_PERMUTE);
+    USE_NEW_COPY_AND_PERMUTE, EXPERIMENTAL_VMM, EXPERIMENTAL_VMM_IPC);
 
 std::map<std::string, std::map<std::string, bool> > namedVariableMap_;
 bool verboseDisabled_ = false;
@@ -556,5 +558,26 @@ bool Behavior::useNewCopyAndPermute() {
       defaultValue);
 }
 
+bool Behavior::experimentalVmm() {
+  constexpr bool defaultValue(false);
+
+  static bool value_       = defaultValue;
+  static bool initialized_ = false;
+  return Teuchos::idempotentlyGetEnvironmentVariable(
+      value_, initialized_, BehaviorDetails::EXPERIMENTAL_VMM,
+      defaultValue);
+}
+
+std::string Behavior::experimentalVmmIpc() {
+  const std::string defaultValue("posix");
+
+  static std::string value_ = defaultValue;
+  static bool initialized_  = false;
+  return Teuchos::idempotentlyGetEnvironmentVariable(
+      value_, initialized_, BehaviorDetails::EXPERIMENTAL_VMM_IPC,
+      defaultValue);
+}
+
 }  // namespace Details
 }  // namespace Tpetra
+

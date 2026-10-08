@@ -30,6 +30,7 @@
 #include <memory>  // std::shared_ptr
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+#pragma message("TPETRA_ENABLE_EXPERIMENTAL_VMM")
 namespace VmmExperiment {
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 class VmmSpmvContext;
@@ -3867,6 +3868,12 @@ class CrsMatrix : public RowMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>,
                     Scalar alpha,
                     Scalar beta) const;
 
+#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+  // Passive experimental extension points.  Neither invokes VMM yet.
+  void initializeVmmContext(const Teuchos::RCP<Teuchos::ParameterList>& params);
+  bool tryApplyVmm(const MV& X_in, MV& Y_in, Scalar alpha, Scalar beta) const;
+#endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
+
   //! Special case of apply() for <tt>mode != Teuchos::NO_TRANS</tt>.
   ///
   /// \param X_in [in] Input MultiVector.
@@ -4227,3 +4234,4 @@ void removeCrsMatrixZeros(CrsMatrixType& matrix,
  */
 
 #endif  // TPETRA_CRSMATRIX_DECL_HPP
+

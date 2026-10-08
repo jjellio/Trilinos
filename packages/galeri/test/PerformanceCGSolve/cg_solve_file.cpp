@@ -468,6 +468,12 @@ int run() {
 #else
   if (useVmm) throw std::runtime_error("This Tpetra build has no CUDA instantiation for --vmm");
 #endif
+    /*
+    std::fprintf(stderr,
+        "DRIVER: matrix=%p sizeof=%zu\n",
+        static_cast<const void*>(A.getRawPtr()),
+        sizeof(crs_matrix_type));
+    */
 
   // Untimed warm-up apply using the selected backend.
 #ifdef HAVE_TPETRA_INST_CUDA
