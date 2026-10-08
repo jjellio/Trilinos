@@ -83,7 +83,7 @@
 #include "GaleriHelper.hpp"
 #include "TpetraMatrixInfo.hpp"
 #include "TpetraMatrixReuseTransform.hpp"
-#include "VmmSpmvContext.hpp"
+#include "Tpetra_Details_VmmSpmvContext.hpp"
 
 std::string matrixName = "miniFE";
 int reuse = -1;
