@@ -21,6 +21,7 @@ class VmmSpmvContext {
   using matrix_type = Tpetra::CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>;
   using multivector_type = Tpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>;
   using scalar_type = typename matrix_type::scalar_type;
+  using impl_scalar_type = typename matrix_type::impl_scalar_type;
   using LO          = typename matrix_type::local_ordinal_type;
   using GO          = typename matrix_type::global_ordinal_type;
   using local_matrix_type = typename matrix_type::local_matrix_device_type;
@@ -28,10 +29,8 @@ class VmmSpmvContext {
   using memory_space = typename device_type::memory_space;
   using entries_type = typename local_matrix_type::index_type::non_const_type;
   using unmanaged_vector_type =
-      Kokkos::View<scalar_type*, device_type, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+      Kokkos::View<impl_scalar_type*, device_type, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
-  static_assert(std::is_same<scalar_type, double>::value,
-                "This initial PerformanceCGSolve VMM experiment supports Scalar=double only");
   static_assert(std::is_integral<LO>::value && std::is_signed<LO>::value,
                 "KokkosSparse local ordinal must be a signed integer");
 
@@ -72,8 +71,12 @@ class VmmSpmvContext {
     }
     auto y1d = Kokkos::subview(y2d, Kokkos::ALL(), 0);
 
-    const scalar_type one  = static_cast<scalar_type>(1.0);
-    const scalar_type zero = static_cast<scalar_type>(0.0);
+
+    using ATS = KokkosKernels::ArithTraits<impl_scalar_type>;
+
+    const auto one  = ATS::one();
+    const auto zero = ATS::zero();
+
     KokkosSparse::spmv("N", one, vmmA_, xGlobal_, zero, y1d);
     Kokkos::fence("VMM direct SpMV fence");
   }
@@ -178,7 +181,7 @@ class VmmSpmvContext {
   }
 
   VmmComm comm_;
-  DistributedVmmArena<scalar_type> arena_;
+  DistributedVmmArena<impl_scalar_type> arena_;
   local_matrix_type localA_;
   entries_type vmmEntries_;
   local_matrix_type vmmA_;
