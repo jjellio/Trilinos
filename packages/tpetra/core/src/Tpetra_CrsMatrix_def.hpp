@@ -4260,10 +4260,11 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     int allEligible = 0;
     Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
                                  localEligible, Teuchos::outArg(allEligible));
-    TEUCHOS_TEST_FOR_EXCEPTION(
-        allEligible == 0, std::invalid_argument,
-        "Experimental VMM requires nonnull row/domain/range/column maps "
-        "and a contiguous domain Map on every participating rank.");
+
+    // we can't do VMM
+    // Experimental VMM requires nonnull row/domain/range/column maps
+    // and a contiguous domain Map on every participating rank.
+    if (allEligible == 0) return;
 
     // Validate the IPC choice collectively too.  A mixture of POSIX and
     // Fabric constructors would otherwise deadlock during handle exchange.
@@ -4280,10 +4281,11 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
                                  localMode, Teuchos::outArg(minMode));
     Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX,
                                  localMode, Teuchos::outArg(maxMode));
-    TEUCHOS_TEST_FOR_EXCEPTION(
-        minMode < 0 || minMode != maxMode, std::invalid_argument,
-        "All participating ranks must select the same Experimental VMM IPC "
-        "value ('posix' or 'fabric').");
+
+    // we can't do VMM
+    // All participating ranks must select the same Experimental VMM IPC
+    // value ('posix' or 'fabric').
+    if (minMode < 0 || minMode != maxMode) return;
 
     const auto ipcMode = (minMode == 0)
         ? VmmExperiment::IpcMode::Posix
@@ -4669,8 +4671,8 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
             "VMM enabled, but CrsMatrix has no VMM context");
     }
 
-    const Scalar ZERO = Teuchos::ScalarTraits<Scalar>::zero();
-    const Scalar ONE  = Teuchos::ScalarTraits<Scalar>::one();
+    //const Scalar ZERO = Teuchos::ScalarTraits<Scalar>::zero();
+    //const Scalar ONE  = Teuchos::ScalarTraits<Scalar>::one();
     const auto domainMap = this->getDomainMap();
     const auto rangeMap  = this->getRangeMap();
     const auto xMap      = X_in.getMap();
@@ -4689,7 +4691,6 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 
     const bool localCanUseVmm =
         static_cast<bool>(vmmContext_) && compatibleMaps &&
-        alpha == ONE && beta == ZERO &&
         X_in.getNumVectors() == 1 && Y_in.getNumVectors() == 1 &&
         X_in.isConstantStride() && Y_in.isConstantStride() &&
         this->getGraph()->getExporter().is_null() &&
@@ -4705,7 +4706,7 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     {
       Teuchos::TimeMonitor timer(
           *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: spmv"));
-      vmmContext_->applyPublished(Y_in);
+      vmmContext_->applyPublished(Y_in,alpha,beta);
     }
 
     return true;
