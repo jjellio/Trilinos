@@ -4666,11 +4666,6 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
         sizeof(*this));
     */
 
-    if (!vmmContext_) {
-        throw std::logic_error(
-            "VMM enabled, but CrsMatrix has no VMM context");
-    }
-
     //const Scalar ZERO = Teuchos::ScalarTraits<Scalar>::zero();
     //const Scalar ONE  = Teuchos::ScalarTraits<Scalar>::one();
     const auto domainMap = this->getDomainMap();
@@ -4743,10 +4738,13 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     return;
   }
 
-#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+#if TPETRA_ENABLE_EXPERIMENTAL_VMM && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
   // The passive hook always returns false; no VMM operations execute yet.
-  if (this->tryApplyVmm(X_in, Y_in, alpha, beta)) {
-    return;
+  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) { 
+     if (!vmmContext_ && Details::Behavior::experimentalVmm()) {
+       this->tryApplyVmm(X_in, Y_in, alpha, beta);
+       return;
+     }
   }
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 
