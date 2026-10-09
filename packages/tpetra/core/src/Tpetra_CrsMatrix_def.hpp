@@ -4273,12 +4273,13 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     // Validate the IPC choice collectively too.  A mixture of POSIX and
     // Fabric constructors would otherwise deadlock during handle exchange.
     const std::string ipcName = Details::Behavior::experimentalVmmIpc();
-    int localMode = -1;
+    auto ipcMode = VmmExperiment::IpcMode::Posix;
     if (ipcName == "posix") {
-      localMode = 0;
+      ipcMode = VmmExperiment::IpcMode::Posix;
     } else if (ipcName == "fabric") {
-      localMode = 1;
+      ipcMode = VmmExperiment::IpcMode::Fabric;
     }
+    /*
     int minMode = -1;
     int maxMode = -1;
     Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
@@ -4294,6 +4295,7 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     const auto ipcMode = (minMode == 0)
         ? VmmExperiment::IpcMode::Posix
         : VmmExperiment::IpcMode::Fabric;
+    */
     // Context owns its arena, aliased CSR values/rowptr, and VMM indices.
     // It does not own the CrsMatrix itself.
     vmmContext_ = std::make_shared<vmm_context_type>(*this, ipcMode);

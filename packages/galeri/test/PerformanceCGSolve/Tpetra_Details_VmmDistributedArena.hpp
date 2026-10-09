@@ -444,7 +444,6 @@ class DistributedVmmArena {
 #ifdef HAVE_MPI
     if (baseVa_ == 0) return;
     Kokkos::fence("VMM arena teardown fence");
-    MPI_Barrier(comm_.mpi());
 
     std::uint64_t byteOffset = 0;
     for (int p = 0; p < size_; ++p) {
@@ -461,7 +460,6 @@ class DistributedVmmArena {
     cuMemAddressFree(baseVa_, totalBytes_);
     baseVa_ = 0;
 
-    MPI_Barrier(comm_.mpi());
     for (auto h : handles_) cuMemRelease(h);
 #endif
   }
