@@ -4235,7 +4235,12 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     return;
   }
 
+
 #if defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
+  // dont use VMM when it's not a distibuted structure
+  if (this->getComm()->getSize() < 2) return ;
+
+ 
   // A Tpetra build may explicitly instantiate both host and CUDA matrices.
   // A compile-time branch prevents instantiation of CUDA-only context code
   // for all non-CUDA CrsMatrix specializations.
@@ -4247,7 +4252,6 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     const auto rowMap = this->getRowMap();
     const auto rangeMap = this->getRangeMap();
     const auto comm = this->getComm();
-
     // Every participating rank reaches these collectives when VMM is enabled.
     // Collectively reject matrices the current VMM address translation cannot
     // represent.  Do this before the arena's own MPI collectives begin.
@@ -4305,11 +4309,6 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     return;
   }
 #endif  // HAVE_TPETRA_INST_CUDA && KOKKOS_ENABLE_CUDA && HAVE_MPI
-
-  TEUCHOS_TEST_FOR_EXCEPTION(
-      true, std::runtime_error,
-      "Experimental VMM requires a CUDA-enabled, MPI-enabled Tpetra build "
-      "with a CUDA execution space and signed integral LocalOrdinal.");
 }
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 
@@ -4653,10 +4652,6 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
                 MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& Y_in,
                 Scalar alpha, Scalar beta) const {
 #if defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
-  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
-    if (!Details::Behavior::experimentalVmm()) {
-      return false;
-    }
     /*
     std::fprintf(stderr,
         "VMM APPLY: rank=%d matrix=%p context=%p sizeof=%zu\n",
@@ -4673,24 +4668,6 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     const auto xMap      = X_in.getMap();
     const auto yMap      = Y_in.getMap();
 
-    // For this first integration, use pointer-identical Maps rather than
-    // isSameAs(): we want a strictly local preflight, with no Map collectives
-    // called conditionally on different ranks.  Equivalent Maps backed by
-    // different objects will conservatively use the ordinary Tpetra path.
-    // A null Exporter independently guarantees the row-to-range layout.
-    const bool compatibleMaps =
-        !domainMap.is_null() && !rangeMap.is_null() &&
-        !xMap.is_null() && !yMap.is_null() &&
-        xMap.getRawPtr() == domainMap.getRawPtr() &&
-        yMap.getRawPtr() == rangeMap.getRawPtr();
-
-    const bool localCanUseVmm =
-        static_cast<bool>(vmmContext_) && compatibleMaps &&
-        X_in.getNumVectors() == 1 && Y_in.getNumVectors() == 1 &&
-        X_in.isConstantStride() && Y_in.isConstantStride() &&
-        this->getGraph()->getExporter().is_null() &&
-        (this->getComm()->getSize() == 1 || Y_in.isDistributed());
-
     Details::ProfilingRegion regionVmm("Tpetra::CrsMatrix::apply: VMM");
     //vmmContext_->apply(X_in, Y_in);  // publish + barrier + KokkosSparse SpMV
     {
@@ -4705,9 +4682,9 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     }
 
     return true;
-  }
-#endif  // CUDA + MPI
+#else  // CUDA + MPI
   return false;
+#endif
 }
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 
@@ -4738,15 +4715,34 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     return;
   }
 
-#if TPETRA_ENABLE_EXPERIMENTAL_VMM && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
-  // The passive hook always returns false; no VMM operations execute yet.
-  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) { 
-     if (!vmmContext_ && Details::Behavior::experimentalVmm()) {
-       this->tryApplyVmm(X_in, Y_in, alpha, beta);
-       return;
-     }
-  }
-#endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
+  #if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && \
+      defined(HAVE_TPETRA_INST_CUDA) && \
+      defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
+  
+    if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
+      if (vmmContext_ && Details::Behavior::experimentalVmm()) {
+        const bool canUseVmm =
+            X_in.getNumVectors() == 1 &&
+            Y_in.getNumVectors() == 1 &&
+            X_in.isConstantStride() &&
+            Y_in.isConstantStride() &&
+            X_in.getMap().getRawPtr() ==
+                this->getDomainMap().getRawPtr() &&
+            Y_in.getMap().getRawPtr() ==
+                this->getRangeMap().getRawPtr() &&
+            this->getGraph()->getExporter().is_null() &&
+            (this->getComm()->getSize() == 1 ||
+             this->getRangeMap()->isDistributed());
+        
+        if (canUseVmm &&
+            this->tryApplyVmm(X_in, Y_in, alpha, beta)) {
+          return;
+        }
+      }
+    }
+  #endif
+
+
 
   // It's possible that X is a view of Y or vice versa.  We don't
   // allow this (apply() requires that X and Y not alias one
