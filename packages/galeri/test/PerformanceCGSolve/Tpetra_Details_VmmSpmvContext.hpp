@@ -74,7 +74,7 @@ class VmmSpmvContext {
 #endif
   }
 
-  void applyPublished(multivector_type& y) const {
+  void applyPublished(multivector_type& y, const Scalar alpha, const Scalar beta) const {
     auto y2d = y.getLocalViewDevice(Tpetra::Access::OverwriteAll);
     if (y2d.extent(1) != 1 || y2d.extent(0) != static_cast<std::size_t>(vmmA_.numRows())) {
       throw std::runtime_error("VMM SpMV: unexpected Tpetra output vector local shape");
@@ -84,16 +84,16 @@ class VmmSpmvContext {
 
     using ATS = KokkosKernels::ArithTraits<impl_scalar_type>;
 
-    const auto one  = ATS::one();
-    const auto zero = ATS::zero();
+    //const auto one  = ATS::one();
+    //const auto zero = ATS::zero();
 
-    KokkosSparse::spmv("N", one, vmmA_, xGlobal_, zero, y1d);
+    KokkosSparse::spmv("N", alpha, vmmA_, xGlobal_, beta, y1d);
     Kokkos::fence("VMM direct SpMV fence");
   }
 
-  void apply(const multivector_type& x, multivector_type& y) {
+  void apply(const multivector_type& x, multivector_type& y, const Scalar alpha, const Scalar beta) {
     publish(x);
-    applyPublished(y);
+    applyPublished(y,alpha,beta);
   }
 
  private:
