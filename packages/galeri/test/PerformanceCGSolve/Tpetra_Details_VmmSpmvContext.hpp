@@ -53,25 +53,33 @@ class VmmSpmvContext {
 
     xGlobal_ = unmanaged_vector_type(arena_.globalPtr(), arena_.totalElements());
     xLocal_  = unmanaged_vector_type(arena_.localPtr(), arena_.logicalLocalCount());
+    // test faulting it
+    Kokkos::deep_copy(xLocal_, Scalar(0));
   }
 
   // Publish the current Tpetra vector into this rank's physical VMM allocation.
   // This is scaffolding for the first implementation; a native VMM-backed
   // Tpetra/solver vector would eliminate this deep copy.
   void publish(const multivector_type& x) {
+
     auto x2d = x.getLocalViewDevice(Tpetra::Access::ReadOnly);
-    if (x2d.extent(1) != 1 || x2d.extent(0) != xLocal_.extent(0)) {
-      throw std::runtime_error("VMM publish: unexpected Tpetra vector local shape");
+    
+    if (x2d.extent(1) != 1 ||
+        x2d.extent(0) != xLocal_.extent(0)) {
+        throw std::runtime_error(
+            "VMM publish: unexpected Tpetra vector local shape");
     }
+    
     auto x1d = Kokkos::subview(x2d, Kokkos::ALL(), 0);
+    
+    // Synchronous by Kokkos definition.
     Kokkos::deep_copy(xLocal_, x1d);
-    Kokkos::fence("VMM publish local X fence");
-#ifdef HAVE_MPI
-    #pragma message("HAVE MPI")
+
+    #ifdef HAVE_MPI
     // Establish a simple global epoch: all owner writes are complete before any
     // rank starts ordinary remote loads.  This is intentionally conservative.
     MPI_Barrier(comm_.mpi());
-#endif
+    #endif
   }
 
   void applyPublished(multivector_type& y, const Scalar alpha, const Scalar beta) const {
