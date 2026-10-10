@@ -29,6 +29,14 @@
 
 #include <memory>  // std::shared_ptr
 
+#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+#pragma message("TPETRA_ENABLE_EXPERIMENTAL_VMM")
+namespace VmmExperiment {
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+class VmmSpmvContext;
+}
+#endif
+
 namespace Tpetra {
 
 // Forward declaration for CrsMatrix::swap() test
@@ -498,6 +506,12 @@ class CrsMatrix : public RowMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>,
       typename row_matrix_type::values_host_view_type;
   using nonconst_values_host_view_type =
       typename row_matrix_type::nonconst_values_host_view_type;
+
+  #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+  using vmm_context_type =
+      VmmExperiment::VmmSpmvContext<
+          Scalar, LocalOrdinal, GlobalOrdinal, Node>;
+  #endif
 
   //@}
   //! @name Constructors and destructor
@@ -3854,6 +3868,12 @@ class CrsMatrix : public RowMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>,
                     Scalar alpha,
                     Scalar beta) const;
 
+#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+  // Passive experimental extension points.  Neither invokes VMM yet.
+  void initializeVmmContext(const Teuchos::RCP<Teuchos::ParameterList>& params);
+  bool tryApplyVmm(const MV& X_in, MV& Y_in, Scalar alpha, Scalar beta) const;
+#endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
+
   //! Special case of apply() for <tt>mode != Teuchos::NO_TRANS</tt>.
   ///
   /// \param X_in [in] Input MultiVector.
@@ -4041,6 +4061,11 @@ class CrsMatrix : public RowMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>,
   /// - Stores the int-typed rowptrs (if they can all be represented by int)
   mutable std::shared_ptr<ApplyHelper> applyHelper;
 
+  #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+  protected:
+  mutable std::shared_ptr<vmm_context_type> vmmContext_;
+  #endif
+
  public:
   // FIXME (mfh 24 Feb 2014) Is it _really_ necessary to make this a
   // public inner class of CrsMatrix?  It looks like it doesn't
@@ -4209,3 +4234,4 @@ void removeCrsMatrixZeros(CrsMatrixType& matrix,
  */
 
 #endif  // TPETRA_CRSMATRIX_DECL_HPP
+

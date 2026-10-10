@@ -40,6 +40,9 @@
 #  define HAVE_TPETRA_QD
 #endif // HAVE_TPETRACORE_QD
 
+/* Determine if we have the Zlib TPL */
+#cmakedefine HAVE_TPETRACORE_ZLIB
+
 /* Define if want to build tpetra-throw_warnings */
 #cmakedefine HAVE_TPETRA_THROW_WARNINGS
 
