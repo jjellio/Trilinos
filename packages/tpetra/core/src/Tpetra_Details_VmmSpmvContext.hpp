@@ -14,6 +14,13 @@
 #include <limits>
 #include <type_traits>
 
+#ifdef TPETRA_ENABLE_NCCL
+#include <nccl.h>
+#endif
+#ifdef VMM_PTHREAD_BARRIER
+#include <pthread.h>
+#endif
+
 namespace VmmExperiment {
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
@@ -55,8 +62,82 @@ class VmmSpmvContext {
     xLocal_  = unmanaged_vector_type(arena_.localPtr(), arena_.logicalLocalCount());
     // test faulting it
     Kokkos::deep_copy(xLocal_, Scalar(0));
+
+    #ifdef TPETRA_ENABLE_NCCL
+    // optional nccl setup
+    #pragma message("Enabling NCCL in VmmContext")
+
+    Kokkos::Cuda exec;
+    stream_ = exec.cuda_stream();
+    cudaMalloc(&nccl_barrier_buf_, sizeof(int));
+    cudaMemset(nccl_barrier_buf_, 0, sizeof(int));
+
+    if (rank_ == 0)
+        ncclGetUniqueId(&nccl_id_);
+    
+    MPI_Bcast(&nccl_id_, sizeof(nccl_id_), MPI_BYTE, 0, comm_.mpi());
+    
+    ncclCommInitRank(
+        &nccl_comm_,
+        size_,
+        nccl_id_,
+        rank_);
+    #endif
+
+//    #ifdef VMM_PTHREAD_BARRIER
+//    // Only rank 0 allocates storage.
+//    MPI_Aint size = (rank == 0)
+//        ? sizeof(pthread_barrier_t)
+//        : 0;
+//    
+//    void* base;
+//    MPI_Win win;
+//    
+//    MPI_Win_allocate_shared(
+//        size, 1, MPI_INFO_NULL,
+//        node_comm, &base, &win
+//    );
+//    
+//    // Obtain rank 0's shared address.
+//    MPI_Aint shared_size;
+//    int disp_unit;
+//    void* shared;
+//    
+//    MPI_Win_shared_query(
+//        win, 0, &shared_size, &disp_unit, &shared
+//    );
+//    
+//    auto* barrier =
+//        static_cast<pthread_barrier_t*>(shared);
+//    
+//    if (rank == 0) {
+//        pthread_barrierattr_t attr;
+//        pthread_barrierattr_init(&attr);
+//    
+//        pthread_barrierattr_setpshared(
+//            &attr, PTHREAD_PROCESS_SHARED
+//        );
+//    
+//        pthread_barrier_init(barrier, &attr, nranks);
+//        pthread_barrierattr_destroy(&attr);
+//    }
+//    
+//    // One-time initialization synchronization.
+//    MPI_Barrier(node_comm);
+//    
+//    // Steady-state barrier: no MPI calls.
+//    // pthread_barrier_wait(barrier);
+//
+//    #endif
+
   }
 
+  virtual ~VmmSpmvContext() {
+    #ifdef TPETRA_ENABLE_NCCL
+    cudaFree(nccl_barrier_buf_);
+    ncclCommDestroy(nccl_comm_);
+    #endif
+   }
   // Publish the current Tpetra vector into this rank's physical VMM allocation.
   // This is scaffolding for the first implementation; a native VMM-backed
   // Tpetra/solver vector would eliminate this deep copy.
@@ -69,16 +150,48 @@ class VmmSpmvContext {
         throw std::runtime_error(
             "VMM publish: unexpected Tpetra vector local shape");
     }
+    {
+      Teuchos::TimeMonitor timer(
+      *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: publish: deep_copy"));
+      auto x1d = Kokkos::subview(x2d, Kokkos::ALL(), 0);
     
-    auto x1d = Kokkos::subview(x2d, Kokkos::ALL(), 0);
-    
-    // Synchronous by Kokkos definition.
-    Kokkos::deep_copy(xLocal_, x1d);
+      // Synchronous by Kokkos definition.
+      Kokkos::deep_copy(xLocal_, x1d);
+    }
 
-    #ifdef HAVE_MPI
-    // Establish a simple global epoch: all owner writes are complete before any
-    // rank starts ordinary remote loads.  This is intentionally conservative.
-    MPI_Barrier(comm_.mpi());
+    #ifdef TPETRA_ENABLE_NCCL
+    {
+      Teuchos::TimeMonitor timer(
+      *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: publish: barrier NCCL"));
+      // Establish a simple global epoch: all owner writes are complete before any
+      // rank starts ordinary remote loads.  This is intentionally conservative.
+      //MPI_Barrier(comm_.mpi());
+      ncclResult_t rc = ncclAllReduce(
+          nccl_barrier_buf_,
+          nccl_barrier_buf_,
+          1,
+          ncclInt32,
+          ncclSum,
+          nccl_comm_,
+          stream_);
+  
+      if (rc != ncclSuccess)
+          throw std::runtime_error(ncclGetErrorString(rc));
+  
+      // Blocks CPU until NCCL collective completes.
+      Kokkos::fence("Tpetra VMM: publish: barrier NCCL");
+      return;
+      // you want to return here
+    }
+    #elif defined(HAVE_MPI)
+    { 
+      Teuchos::TimeMonitor timer(
+      *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: publish: barrier MPI"));
+      // Establish a simple global epoch: all owner writes are complete before any
+      // rank starts ordinary remote loads.  This is intentionally conservative.
+      MPI_Barrier(comm_.mpi());
+      return;
+    }
     #endif
   }
 
@@ -223,6 +336,12 @@ class VmmSpmvContext {
   unmanaged_vector_type xLocal_;
   int rank_ = 0;
   int size_ = 1;
+  #ifdef TPETRA_ENABLE_NCCL
+  ncclUniqueId nccl_id_;
+  ncclComm_t nccl_comm_ = nullptr;
+  int* nccl_barrier_buf_ = nullptr;
+  cudaStream_t stream_ = nullptr;
+  #endif
 };
 
 }  // namespace VmmExperiment
