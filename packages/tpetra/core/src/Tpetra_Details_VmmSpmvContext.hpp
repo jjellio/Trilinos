@@ -209,7 +209,7 @@ class VmmSpmvContext {
     //const auto zero = ATS::zero();
 
     KokkosSparse::spmv("N", alpha, vmmA_, xGlobal_, beta, y1d);
-    Kokkos::fence("VMM direct SpMV fence");
+    //Kokkos::fence("VMM direct SpMV fence");
   }
 
   void apply(const multivector_type& x, multivector_type& y, const Scalar alpha, const Scalar beta) {
