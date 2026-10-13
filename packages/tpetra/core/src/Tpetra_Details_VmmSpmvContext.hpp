@@ -7,7 +7,9 @@
 #ifdef HAVE_TPETRA_INST_CUDA
 
 #include "Tpetra_Details_VmmDistributedArena.hpp"
+#include "Tpetra_Details_VmmMatrixInfo.hpp"
 #include "Tpetra_CrsMatrix_fwd.hpp"
+#include "Tpetra_DistObject_fwd.hpp"
 #include "Tpetra_MultiVector.hpp"
 #include "KokkosSparse_CrsMatrix.hpp"
 #include "KokkosSparse_spmv.hpp"
@@ -57,6 +59,44 @@ class VmmSpmvContext {
     rank_ = comm_.rank();
     size_ = comm_.size();
     buildAddressedMatrix(A);
+
+    const auto& analysis = TpetraMatrixInfo::analyzeAccessPattern(A);
+
+    if (analysis.myRank == 0) {
+      std::ostringstream os;
+   
+      using dist_object_type = Tpetra::DistObject<
+          char,
+          typename matrix_type::local_ordinal_type,
+          typename matrix_type::global_ordinal_type,
+          typename matrix_type::node_type>;
+ 
+      // Use the same address representation as the
+      // DistObject::setObjectLabel() hook.
+      const auto* identity =
+          static_cast<const dist_object_type*>(&A);
+    
+      // The analysis already contains the globally reduced
+      // reference counts, so this also gives global NNZ.
+      TpetraMatrixInfo::count_type globalNnz = 0;
+      for (const auto count : analysis.references) {
+        globalNnz += count;
+      }
+    
+      os << "\n[TPETRA_MATRIX] event=fillComplete"
+         << " object=" << static_cast<const void*>(identity)
+         << " label=" << std::quoted(A.getObjectLabel())
+         << " rows=" << A.getGlobalNumRows()
+         << " cols=" << A.getGlobalNumCols()
+         << " nnz=" << globalNnz
+         << '\n';
+    
+      print(os, analysis);
+      std::cout << os.str();
+    }
+
+
+    
 
     xGlobal_ = unmanaged_vector_type(arena_.globalPtr(), arena_.totalElements());
     xLocal_  = unmanaged_vector_type(arena_.localPtr(), arena_.logicalLocalCount());

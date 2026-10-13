@@ -1839,6 +1839,42 @@ void DistObject<Packet, LocalOrdinal, GlobalOrdinal, Node>::print(
   this->describe(*out, Teuchos::VERB_DEFAULT);
 }
 
+
+template <class Packet, class LocalOrdinal,
+          class GlobalOrdinal, class Node>
+void
+DistObject<Packet, LocalOrdinal, GlobalOrdinal, Node>::
+setObjectLabel(const std::string& newLabel)
+{
+  const std::string oldLabel = this->getObjectLabel();
+
+  Teuchos::LabeledObject::setObjectLabel(newLabel);
+
+  // Use existing Tpetra verbose control for this experiment.
+  if (!Tpetra::Details::Behavior::experimentalVmmStatistics())
+    return;
+
+  if (oldLabel == newLabel)
+    return;
+
+  const auto map = this->getMap();
+  if (map.is_null())
+    return;
+
+  const auto comm = map->getComm();
+  if (!comm.is_null() && comm->getRank() == 0) {
+    std::ostringstream os;
+    os << "[TPETRA_MATRIX] event=setObjectLabel"
+       << " object=" << static_cast<const void*>(this)
+       << " old=" << std::quoted(oldLabel)
+       << " new=" << std::quoted(newLabel)
+       << '\n';
+
+    std::cout << os.str() << std::flush;
+  }
+}
+
+
 template <class Packet, class LocalOrdinal, class GlobalOrdinal, class Node>
 std::unique_ptr<std::string>
 DistObject<Packet, LocalOrdinal, GlobalOrdinal, Node>::createPrefix(

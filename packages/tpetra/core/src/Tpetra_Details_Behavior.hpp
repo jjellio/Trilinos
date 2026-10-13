@@ -319,6 +319,15 @@ class Behavior {
   /// The VMM code interprets this value (currently "posix" or "fabric").
   static std::string experimentalVmmIpc();
 
+  /// \brief CUDA VMM statistics
+  ///
+  /// Controlled by TPETRA_EXPERIMENTAL_VMM_STATISTICS ; disabled by default
+  /// The VMM code will emit information at fill complete about fill and reuse
+  /// of nonzeros per rank. Since matrices may not have labels till after
+  /// fill complete, this will emit information in setLabel of DistObject
+  /// that can be used to tie a label back to the statistics
+  static bool experimentalVmmStatistics();
+
   /// \brief DO NOT COMMIT - Make Apply Synchronous.
   ///
   /// Controlled by TPETRA_SYNCHRONIZE_APPLY; defaults to off.

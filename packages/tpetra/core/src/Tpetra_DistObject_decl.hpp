@@ -578,6 +578,9 @@ class DistObject : virtual public SrcDistObject,
            const Teuchos::EVerbosityLevel verbLevel =
                Teuchos::Describable::verbLevel_default) const;
 
+  /// Log label changes for matrix identification diagnostics.
+  void setObjectLabel(const std::string& objectLabel) override;
+
   //@}
   //! @name Methods for use only by experts
   //@{

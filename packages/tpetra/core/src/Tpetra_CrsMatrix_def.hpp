@@ -55,6 +55,7 @@
 // for non-CUDA Tpetra specializations or non-MPI builds.
 #if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && \
     defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
+#pragma message("TPETRA_ENABLE_EXPERIMENTAL_VMM")
 #include "Tpetra_Details_VmmSpmvContext.hpp"
 #include "Teuchos_CommHelpers.hpp"
 #include "Teuchos_TimeMonitor.hpp"
@@ -67,6 +68,8 @@
 #include <typeinfo>
 #include <utility>
 #include <vector>
+// temp - used to synchronize apply
+#include <optional>
 
 namespace Tpetra {
 
@@ -4235,6 +4238,7 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     return;
   }
 
+  Teuchos::TimeMonitor timer(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: initializeVmmContext"));
 
 #if defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
   // dont use VMM when it's not a distibuted structure
@@ -4298,8 +4302,10 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     */
     // Context owns its arena, aliased CSR values/rowptr, and VMM indices.
     // It does not own the CrsMatrix itself.
+    {
+    Teuchos::TimeMonitor timer(*Teuchos::TimeMonitor::getNewTimer("vmmContext Ctor"));
     vmmContext_ = std::make_shared<vmm_context_type>(*this, ipcMode);
-
+    }
     /*
     std::fprintf(stderr,
         "VMM INIT: rank=%d matrix=%p context=%p sizeof=%zu\n",
@@ -4744,7 +4750,21 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     }
   #endif
 
+  // Before comm and local spmv
+  const bool synchronize =
+      Tpetra::Details::Behavior::synchronizeApply();
 
+  std::optional<Teuchos::TimeMonitor> commTimer;
+  std::optional<Teuchos::TimeMonitor> spmvTimer;
+
+  Teuchos::RCP<Teuchos::Time> commTeuchosTimer_;
+  Teuchos::RCP<Teuchos::Time> spmvTeuchosTimer_;
+
+  if (synchronize) {
+    commTeuchosTimer_ = Teuchos::TimeMonitor::getNewTimer("Tpetra Classic: mpi pack");
+    spmvTeuchosTimer_ = Teuchos::TimeMonitor::getNewTimer("Tpetra Classic: spmv");
+    commTimer.emplace(*commTeuchosTimer_);
+  }
 
   // It's possible that X is a view of Y or vice versa.  We don't
   // allow this (apply() requires that X and Y not alias one
@@ -4817,6 +4837,11 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   // Export is trivial (null).
   RCP<MV> Y_rowMap = getRowMapMultiVector(Y_in);
 
+  if (synchronize) {
+    // stop comm start spmv
+    commTimer.reset();
+    spmvTimer.emplace(*spmvTeuchosTimer_);
+  }
   // If we have a nontrivial Export object, we must perform an
   // Export.  In that case, the local multiply result will go into
   // the row Map multivector.  We don't have to make a
@@ -5148,12 +5173,32 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
                              fnName << ": Cannot call apply() until fillComplete() "
                                        "has been called.");
 
+  // Before apply
+  const bool synchronize =
+      Tpetra::Details::Behavior::synchronizeApply();
+
+  if (synchronize) {
+    Kokkos::fence();
+    this->getComm()->barrier();
+  }
+
+  std::optional<Teuchos::TimeMonitor> applyTimer;
+
+  if (synchronize) {
+    applyTimer.emplace(
+        *Teuchos::TimeMonitor::getNewTimer(fnName));
+  }
+
   if (mode == Teuchos::NO_TRANS) {
     ProfilingRegion regionNonTranspose(fnName);
     this->applyNonTranspose(X, Y, alpha, beta);
   } else {
     ProfilingRegion regionTranspose("Tpetra::CrsMatrix::apply (transpose)");
     this->applyTranspose(X, Y, mode, alpha, beta);
+  }
+
+  if (synchronize) {
+    Kokkos::fence();
   }
 }
 
