@@ -23,6 +23,10 @@
 #include "Tpetra_Vector.hpp"
 #include "Tpetra_Details_allReduceView.hpp"
 #include "Tpetra_Details_Behavior.hpp"
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+#include "Tpetra_Details_VmmDistributedArena.hpp"
+#include "Teuchos_CommHelpers.hpp"
+#endif
 #include "Tpetra_Details_checkView.hpp"
 #include "Tpetra_Details_fill.hpp"
 #include "Tpetra_Details_gathervPrint.hpp"
@@ -42,6 +46,8 @@
 #include "KokkosKernels_Utils.hpp"
 #include "Kokkos_Random.hpp"
 #include "KokkosKernels_ArithTraits.hpp"
+#include <iomanip>
+#include <iostream>
 #include <memory>
 #include <sstream>
 
@@ -404,7 +410,78 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   ::Tpetra::Details::ProfilingRegion region("Tpetra::MV ctor (map,numVecs,zeroOut)");
 
   const size_t lclNumRows = this->getLocalLength();
-  view_                   = allocDualView<Scalar, LocalOrdinal, GlobalOrdinal, Node>(lclNumRows, numVecs, zeroOut);
+  // This constructor is the allocation site for both ordinary MVs and
+  // eligible native VMM MVs.  Print one rank-0 record after allocation.
+  // A later label assignment emits another record with the same object ID.
+  const auto logAllocation = [&]() {
+    if (!::Tpetra::Details::Behavior::experimentalVmmStatistics() ||
+        map.is_null() || map->getComm().is_null() ||
+        map->getComm()->getRank() != 0) {
+      return;
+    }
+    std::ostringstream os;
+    os << "[TPETRA_MV] event=allocate"
+       << " object=" << static_cast<const void*>(this)
+       << " label=" << std::quoted(this->getObjectLabel())
+       << " rows=" << this->getGlobalLength()
+       << " cols=" << numVecs
+       << " local_rows=" << lclNumRows
+       << " storage=" << (this->isVmmBacked() ? "vmm" : "standard")
+       << '\n';
+    std::cout << os.str() << std::flush;
+  };
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
+  // EXPERIMENTAL / COLLECTIVE constructor path.  All participating ranks
+  // must enter these one-column constructors in the same sequence.
+  // Unsupported configurations retain the standard Tpetra allocation.
+  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value &&
+                std::is_same<typename dual_view_type::t_dev::memory_space,
+                             Kokkos::CudaSpace>::value &&
+                std::is_trivially_copyable<impl_scalar_type>::value) {
+    if (::Tpetra::Details::Behavior::experimentalVmmNativeMv() &&
+        ::Tpetra::Details::Behavior::experimentalVmm() && numVecs == 1 &&
+        !map.is_null() && !map->getComm().is_null() &&
+        map->getComm()->getSize() > 1) {
+      const auto comm = map->getComm();
+      // Eligibility must be agreed on before any rank starts CUDA IPC.
+      const int localEligible = (map->isContiguous() && map->isOneToOne()) ? 1 : 0;
+      int allEligible = 0;
+      Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                   localEligible, Teuchos::outArg(allEligible));
+      const auto ipcName = ::Tpetra::Details::Behavior::experimentalVmmIpc();
+      const int localMode = ipcName == "posix" ? 0 : (ipcName == "fabric" ? 1 : -1);
+      int minMode = -1, maxMode = -1;
+      Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                   localMode, Teuchos::outArg(minMode));
+      Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX,
+                                   localMode, Teuchos::outArg(maxMode));
+      if (allEligible != 0 && minMode >= 0 && minMode == maxMode) {
+        const auto mode = minMode == 0 ? VmmExperiment::IpcMode::Posix
+                                       : VmmExperiment::IpcMode::Fabric;
+        VmmExperiment::VmmComm vmmComm(comm);
+        auto layout = VmmExperiment::VmmLayout<impl_scalar_type>::compute(
+            lclNumRows, mode, vmmComm);
+        auto arena = std::make_shared<VmmExperiment::DistributedVmmArena<impl_scalar_type>>(
+            std::move(layout));
+        using dev_view_type = typename dual_view_type::t_dev;
+        // Wrap only local physical storage in the ordinary Tpetra view.
+        // Its global VMM mapping is exposed separately by getVmmGlobalPtr().
+        dev_view_type dView(arena->localPtr(), lclNumRows, size_t(1));
+        view_ = wrapped_dual_view_type(dView, std::static_pointer_cast<void>(arena));
+        if (zeroOut) {
+          Kokkos::deep_copy(dView, impl_scalar_type{});
+        } else if (::Tpetra::Details::Behavior::debug()) {
+          KokkosBlas::fill(dView, KokkosKernels::ArithTraits<impl_scalar_type>::nan());
+        }
+        vmmArena_ = std::move(arena);
+        logAllocation();
+        return;
+      }
+    }
+  }
+#endif
+  view_ = allocDualView<Scalar, LocalOrdinal, GlobalOrdinal, Node>(lclNumRows, numVecs, zeroOut);
+  logAllocation();
 }
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
@@ -414,6 +491,9 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   : base_type(source)
   , view_(source.view_)
   , whichVectors_(source.whichVectors_) {
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  vmmArena_ = source.vmmArena_;
+#endif
   typedef MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node> MV;
   const char tfecfFuncName[] =
       "MultiVector(const MultiVector&, "
@@ -427,6 +507,9 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     MV cpy              = createCopy(source);
     this->view_         = cpy.view_;
     this->whichVectors_ = cpy.whichVectors_;
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+    this->vmmArena_     = cpy.vmmArena_;
+#endif
   } else if (copyOrView == Teuchos::View) {
   } else {
     TEUCHOS_TEST_FOR_EXCEPTION_CLASS_FUNC(
@@ -2650,6 +2733,11 @@ void MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   }
 
   this->map_ = newMap;
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  // replaceMap may keep the bytes but changes the distributed meaning.
+  // The external owner in view_ still protects any borrowed VMM memory.
+  vmmArena_.reset();
+#endif
 }
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
@@ -3478,6 +3566,10 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   TEUCHOS_TEST_FOR_EXCEPTION_CLASS_FUNC(j >= numCols, std::invalid_argument, "Input index j (== " << j << ") exceeds valid column index range [0, " << numCols << " - 1].");
   const size_t jj = X.isConstantStride() ? static_cast<size_t>(j) : static_cast<size_t>(X.whichVectors_[j]);
   this->view_     = takeSubview(X.view_, Kokkos::ALL(), range_type(jj, jj + 1));
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  // getVector(0) and getVectorNonConst(0) share the same allocation.
+  if (jj == 0) this->vmmArena_ = X.vmmArena_;
+#endif
 
   // mfh 31 Jul 2017: It would be unwise to execute concurrent
   // Export or Import operations with different subviews of a
@@ -4222,6 +4314,75 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   return Kokkos::Compat::persistingView(X_col.view_device());
 }
 
+// DistObject's experimental setObjectLabel logging currently uses the
+// TPETRA_MATRIX tag for all subclasses.  Override only for MultiVector,
+// retaining the underlying Teuchos label update and the same rank-0 policy.
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+void MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
+    setObjectLabel(const std::string& newLabel) {
+  const std::string oldLabel = this->getObjectLabel();
+  Teuchos::LabeledObject::setObjectLabel(newLabel);
+
+  if (oldLabel == newLabel ||
+      !::Tpetra::Details::Behavior::experimentalVmmStatistics()) {
+    return;
+  }
+  const auto map = this->getMap();
+  if (map.is_null() || map->getComm().is_null() ||
+      map->getComm()->getRank() != 0) {
+    return;
+  }
+  std::ostringstream os;
+  os << "[TPETRA_MV] event=setObjectLabel"
+     << " object=" << static_cast<const void*>(this)
+     << " old=" << std::quoted(oldLabel)
+     << " new=" << std::quoted(newLabel)
+     << " rows=" << this->getGlobalLength()
+     << " cols=" << this->getNumVectors()
+     << " storage=" << (this->isVmmBacked() ? "vmm" : "standard")
+     << '\n';
+  std::cout << os.str() << std::flush;
+}
+
+// The canonical VMM representation exists only for a full one-column
+// distributed Vector.  Row subviews, changed Maps, and alternative storage
+// must not expose it as a global distributed Vector.
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+bool MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
+    isVmmBacked() const {
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  return vmmArena_ && !this->getMap().is_null() &&
+         this->getLocalLength() == vmmArena_->logicalLocalCount() &&
+         this->getNumVectors() == 1 && this->isConstantStride() &&
+         (this->getLocalLength() == 0 ||
+          view_.implGetDualView().view_device().data() == vmmArena_->localPtr());
+#else
+  return false;
+#endif
+}
+
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+const typename MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::impl_scalar_type*
+MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
+    getVmmGlobalPtr() const {
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  return isVmmBacked() ? vmmArena_->globalPtr() : nullptr;
+#else
+  return nullptr;
+#endif
+}
+
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+const VmmExperiment::VmmLayout<typename MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::impl_scalar_type>*
+MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
+    getVmmLayout() const {
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  return isVmmBacked() ? &vmmArena_->layout() : nullptr;
+#else
+  return nullptr;
+#endif
+}
+
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 bool MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     need_sync_host() const {
@@ -4538,6 +4699,9 @@ void MultiVector<ST, LO, GO, NT>::
   std::swap(mv.map_, this->map_);
   std::swap(mv.view_, this->view_);
   std::swap(mv.whichVectors_, this->whichVectors_);
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  std::swap(mv.vmmArena_, this->vmmArena_);
+#endif
 }
 
 #ifdef HAVE_TPETRACORE_TEUCHOSNUMERICS

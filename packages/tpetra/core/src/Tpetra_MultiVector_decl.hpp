@@ -28,7 +28,13 @@
 #include "Tpetra_KokkosRefactor_Details_MultiVectorLocalDeepCopy.hpp"
 #include "Tpetra_Access.hpp"
 #include "Tpetra_Details_WrappedDualView.hpp"
+#include <memory>
 #include <type_traits>
+
+namespace VmmExperiment {
+template <class Scalar> class DistributedVmmArena;
+template <class Scalar> class VmmLayout;
+}
 
 #ifdef HAVE_TPETRACORE_TEUCHOSNUMERICS
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
@@ -430,6 +436,13 @@ class MultiVector : public DistObject<Scalar, LocalOrdinal, GlobalOrdinal, Node>
 
   using host_view_type   = typename dual_view_type::t_host;
   using device_view_type = typename dual_view_type::t_dev;
+
+  // Experimental native CUDA VMM vector storage.  Ordinary MVs return
+  // false/nullptr.  These do not synchronize the device view: callers
+  // must obtain getLocalViewDevice(ReadOnly) before using the global ptr.
+  bool isVmmBacked() const;
+  const impl_scalar_type* getVmmGlobalPtr() const;
+  const VmmExperiment::VmmLayout<impl_scalar_type>* getVmmLayout() const;
 
   //@}
   //! @name Constructors and destructor
@@ -2043,6 +2056,9 @@ class MultiVector : public DistObject<Scalar, LocalOrdinal, GlobalOrdinal, Node>
   //! A simple one-line description of this object.
   virtual std::string description() const override;
 
+  /// Log MultiVector label updates separately from matrix diagnostics.
+  void setObjectLabel(const std::string& objectLabel) override;
+
   /// \brief Print the object with the given verbosity level to a FancyOStream.
   ///
   /// \param out [out] Output stream to which to print.  For
@@ -2175,6 +2191,11 @@ class MultiVector : public DistObject<Scalar, LocalOrdinal, GlobalOrdinal, Node>
   /// implied a device->host synchronization.  Lesson to the reader:
   /// Use \c const sparingly!
   mutable wrapped_dual_view_type view_;
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  // Typed access for the canonical one-column VMM object.  The same arena
+  // is also retained by view_'s WrappedDualView external-owner token.
+  std::shared_ptr<VmmExperiment::DistributedVmmArena<impl_scalar_type>> vmmArena_;
+#endif
 
   /// \brief Indices of columns this multivector is viewing.
   ///

@@ -313,6 +313,12 @@ class Behavior {
   /// experimental VMM implementation.
   static bool experimentalVmm();
 
+  /// \brief Enable experimental native VMM-backed one-column MultiVectors.
+  ///
+  /// Controlled by TPETRA_EXPERIMENTAL_VMM_NATIVE_MV; disabled by default.
+  /// Also requires TPETRA_EXPERIMENTAL_VMM and a supported CUDA/MPI build.
+  static bool experimentalVmmNativeMv();
+
   /// \brief CUDA VMM interprocess sharing mechanism.
   ///
   /// Controlled by TPETRA_EXPERIMENTAL_VMM_IPC; defaults to "posix".

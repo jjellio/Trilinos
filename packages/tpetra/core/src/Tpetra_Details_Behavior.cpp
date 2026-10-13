@@ -109,6 +109,7 @@ constexpr const std::string_view TIME_KOKKOS_FUNCTIONS =
 constexpr const std::string_view USE_NEW_COPY_AND_PERMUTE = "TPETRA_USE_NEW_COPY_AND_PERMUTE";
 constexpr const std::string_view EXPERIMENTAL_VMM = "TPETRA_EXPERIMENTAL_VMM";
 constexpr const std::string_view EXPERIMENTAL_VMM_IPC = "TPETRA_EXPERIMENTAL_VMM_IPC";
+constexpr const std::string_view EXPERIMENTAL_VMM_NATIVE_MV = "TPETRA_EXPERIMENTAL_VMM_NATIVE_MV";
 constexpr const std::string_view EXPERIMENTAL_VMM_STATISTICS = "TPETRA_EXPERIMENTAL_VMM_STATISTICS";
 constexpr const std::string_view SYNCHRONIZE_APPLY = "TPETRA_SYNCHRONIZE_APPLY";
 
@@ -133,6 +134,7 @@ constexpr const auto RECOGNIZED_VARS = make_array(
     USE_NEW_COPY_AND_PERMUTE,
     EXPERIMENTAL_VMM,
     EXPERIMENTAL_VMM_IPC,
+    EXPERIMENTAL_VMM_NATIVE_MV,
     EXPERIMENTAL_VMM_STATISTICS,
     SYNCHRONIZE_APPLY);
 
@@ -571,6 +573,16 @@ bool Behavior::experimentalVmm() {
   static bool initialized_ = false;
   return Teuchos::idempotentlyGetEnvironmentVariable(
       value_, initialized_, BehaviorDetails::EXPERIMENTAL_VMM,
+      defaultValue);
+}
+
+bool Behavior::experimentalVmmNativeMv() {
+  constexpr bool defaultValue(false);
+
+  static bool value_       = defaultValue;
+  static bool initialized_ = false;
+  return Teuchos::idempotentlyGetEnvironmentVariable(
+      value_, initialized_, BehaviorDetails::EXPERIMENTAL_VMM_NATIVE_MV,
       defaultValue);
 }
 

@@ -16,6 +16,8 @@
 #include "Teuchos_TestForException.hpp"
 #include "Tpetra_Details_ExecutionSpaces.hpp"
 #include "TpetraCore_DLLExportMacro.h"
+#include <memory>
+#include <utility>
 #include <sstream>
 
 // #define DEBUG_UVM_REMOVAL  // Works only with gcc > 4.8
@@ -139,17 +141,43 @@ class WrappedDualView {
     : originalDualView(dualV)
     , dualView(originalDualView) {}
 
+  // Experimental external device allocation.  Unlike an ordinary Kokkos
+  // View, the device memory is owned by a separate allocator (CUDA VMM).
+  // The owner token is shared by copies and WrappedDualView subviews.
+  // This constructor intentionally retains the standard host mirror and
+  // DualView synchronization behavior.
+  WrappedDualView(const t_dev deviceView, std::shared_ptr<void> externalOwner)
+    : externalDeviceOwner_(std::move(externalOwner)) {
+    TEUCHOS_TEST_FOR_EXCEPTION(!externalDeviceOwner_, std::invalid_argument,
+                               "WrappedDualView: null external device owner");
+    TEUCHOS_TEST_FOR_EXCEPTION(deviceView.data() != nullptr &&
+                                   deviceView.use_count() != 0,
+                               std::invalid_argument,
+                               "WrappedDualView: external device view must be unmanaged");
+    t_host hostView = Kokkos::create_mirror_view(
+        Kokkos::WithoutInitializing,
+        typename t_host::memory_space(), deviceView);
+    originalDualView = DualViewType(deviceView, hostView);
+    originalDualView.clear_sync_state();
+    originalDualView.modify_device();
+    dualView = originalDualView;
+  }
+
   //! Conversion copy constructor.
   template <class SrcDualViewType>
   WrappedDualView(const WrappedDualView<SrcDualViewType>& src)
-    : originalDualView(src.originalDualView)
+    : externalDeviceOwner_(src.externalDeviceOwner_)
+    , originalDualView(src.originalDualView)
     , dualView(src.dualView) {}
 
   //! Conversion assignment operator.
   template <class SrcDualViewType>
   WrappedDualView& operator=(const WrappedDualView<SrcDualViewType>& src) {
-    originalDualView = src.originalDualView;
-    dualView         = src.dualView;
+    // A borrowed device allocation must outlive the old DualViews as well
+    // as the newly assigned ones.  Assign the views before the owner token.
+    originalDualView     = src.originalDualView;
+    dualView             = src.dualView;
+    externalDeviceOwner_ = src.externalDeviceOwner_;
     return *this;
   }
 
@@ -186,22 +214,26 @@ class WrappedDualView {
 
   // 1D View constructors
   WrappedDualView(const WrappedDualView parent, int offset, int numEntries) {
+    externalDeviceOwner_ = parent.externalDeviceOwner_;
     originalDualView = parent.originalDualView;
     dualView         = getSubview(parent.dualView, offset, numEntries);
   }
 
   // 2D View Constructors
   WrappedDualView(const WrappedDualView parent, const Kokkos::pair<size_t, size_t>& rowRng, const Kokkos::ALL_t& colRng) {
+    externalDeviceOwner_ = parent.externalDeviceOwner_;
     originalDualView = parent.originalDualView;
     dualView         = getSubview2D(parent.dualView, rowRng, colRng);
   }
 
   WrappedDualView(const WrappedDualView parent, const Kokkos::ALL_t& rowRng, const Kokkos::pair<size_t, size_t>& colRng) {
+    externalDeviceOwner_ = parent.externalDeviceOwner_;
     originalDualView = parent.originalDualView;
     dualView         = getSubview2D(parent.dualView, rowRng, colRng);
   }
 
   WrappedDualView(const WrappedDualView parent, const Kokkos::pair<size_t, size_t>& rowRng, const Kokkos::pair<size_t, size_t>& colRng) {
+    externalDeviceOwner_ = parent.externalDeviceOwner_;
     originalDualView = parent.originalDualView;
     dualView         = getSubview2D(parent.dualView, rowRng, colRng);
   }
@@ -646,7 +678,10 @@ class WrappedDualView {
 
   void throwIfHostViewAlive() const {
     throwIfViewsAreDifferentSizes();
-    if (getRawHostView().use_count() > getRawDeviceView().use_count()) {
+    // Externally owned device Views have no Kokkos allocation record, so
+    // their use_count() cannot be compared to that of a managed host view.
+    if (!externalDeviceOwner_ &&
+        getRawHostView().use_count() > getRawDeviceView().use_count()) {
       std::ostringstream msg;
       msg << "Tpetra::Details::WrappedDualView (name = " << getRawDeviceView().label()
           << "; host use_count = " << getRawHostView().use_count()
@@ -658,7 +693,8 @@ class WrappedDualView {
 
   void throwIfDeviceViewAlive() const {
     throwIfViewsAreDifferentSizes();
-    if (getRawDeviceView().use_count() > getRawHostView().use_count()) {
+    if (!externalDeviceOwner_ &&
+        getRawDeviceView().use_count() > getRawHostView().use_count()) {
       std::ostringstream msg;
       msg << "Tpetra::Details::WrappedDualView (name = " << getRawDeviceView().label()
           << "; host use_count = " << getRawHostView().use_count()
@@ -672,6 +708,9 @@ class WrappedDualView {
     return getRawHostOriginalView() != getRawHostView();
   }
 
+  // Declare first so that CUDA VMM memory is released AFTER DualViews.
+  // Escaped unmanaged Kokkos views do not extend this lifetime.
+  std::shared_ptr<void> externalDeviceOwner_;
   mutable DualViewType originalDualView;
   mutable DualViewType dualView;
 };
