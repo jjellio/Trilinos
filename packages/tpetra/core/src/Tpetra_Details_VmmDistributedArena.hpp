@@ -5,102 +5,19 @@
 
 #ifdef HAVE_TPETRA_INST_CUDA
 
-#include "Teuchos_Comm.hpp"
-#include "Teuchos_RCP.hpp"
-#ifdef HAVE_MPI
-#include "Teuchos_DefaultMpiComm.hpp"
-#include <mpi.h>
-#endif
+#include "Tpetra_Details_VmmLayout.hpp"
 #include <Kokkos_Core.hpp>
-#include <cuda.h>
-#include <cuda_runtime_api.h>
-#include <algorithm>
 #include <cerrno>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
-#include <numeric>
-#include <stdexcept>
-#include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
-#include <vector>
-#include <utility>
 
 namespace VmmExperiment {
-
-// Value object; copying shares the same Teuchos communicator reference.
-// No process-global communicator or rank is assumed.
-struct VmmComm {
-  explicit VmmComm(Teuchos::RCP<const Teuchos::Comm<int>> communicator)
-      : comm(std::move(communicator)) {
-    if (comm.is_null()) {
-      throw std::invalid_argument("VMM context requires a non-null Teuchos communicator");
-    }
-#ifdef HAVE_MPI
-    // Fail early rather than silently substituting a process-wide MPI comm for a
-    // SerialComm or an unsupported Comm implementation.
-    (void)Teuchos::getRawMpiComm(*comm);
-#endif
-  }
-
-  int rank() const { return comm->getRank(); }
-  int size() const { return comm->getSize(); }
-
-#ifdef HAVE_MPI
-  // Get the raw handle on demand: its lifetime belongs to the RCP above.
-  MPI_Comm mpi() const { return Teuchos::getRawMpiComm(*comm); }
-#endif
-
-  Teuchos::RCP<const Teuchos::Comm<int>> comm;
-};
-
-[[noreturn]] inline void abortWithMessage(const VmmComm& comm,
-                                          const std::string& msg) {
-  std::fprintf(stderr, "rank %d: %s\n", comm.rank(), msg.c_str());
-  std::fflush(stderr);
-#ifdef HAVE_MPI
-  MPI_Abort(comm.mpi(), 1);
-#endif
-  std::abort();
-}
-
-inline void checkCudaDriver(const VmmComm& comm, CUresult err,
-                            const char* expr, const char* file, int line) {
-  if (err == CUDA_SUCCESS) return;
-  const char* name = nullptr;
-  const char* text = nullptr;
-  cuGetErrorName(err, &name);
-  cuGetErrorString(err, &text);
-  char buf[2048];
-  std::snprintf(buf, sizeof(buf), "%s:%d: %s failed: %s (%s)", file, line, expr,
-                name ? name : "CUDA_ERROR", text ? text : "unknown");
-  abortWithMessage(comm, buf);
-}
-
-inline void checkCudaRuntime(const VmmComm& comm, cudaError_t err,
-                             const char* expr, const char* file, int line) {
-  if (err == cudaSuccess) return;
-  char buf[2048];
-  std::snprintf(buf, sizeof(buf), "%s:%d: %s failed: %s", file, line, expr,
-                cudaGetErrorString(err));
-  abortWithMessage(comm, buf);
-}
-
-#define VMM_CU_CHECK(comm, call) \
-    ::VmmExperiment::checkCudaDriver((comm), (call), #call, __FILE__, __LINE__)
-#define VMM_CUDART_CHECK(comm, call) \
-    ::VmmExperiment::checkCudaRuntime((comm), (call), #call, __FILE__, __LINE__)
-
-inline std::uint64_t roundUp(std::uint64_t n, std::uint64_t a) {
-  return ((n + a - 1) / a) * a;
-}
 
 inline void setCloseOnExec(int fd, const VmmComm& comm) {
   const int flags = fcntl(fd, F_GETFD);
@@ -283,84 +200,46 @@ inline std::vector<int> exchangePosixFds(int localFd, const VmmComm& comm) {
 }
 #endif
 
-enum class IpcMode { Posix, Fabric };
-
-inline IpcMode parseIpcMode(const std::string& text) {
-  if (text == "posix") return IpcMode::Posix;
-  if (text == "fabric") return IpcMode::Fabric;
-  throw std::runtime_error("--vmm-ipc must be 'posix' or 'fabric'");
-}
-
 template <class Scalar>
 class DistributedVmmArena {
  public:
+  // Compatibility constructor for the current SpmvContext. The new layout
+  // constructor below allows the matrix and arena to compute layout separately.
   DistributedVmmArena(std::size_t logicalLocalCount, IpcMode ipcMode,
                       const VmmComm& comm)
-      : comm_(comm), ipcMode_(ipcMode), logicalLocalCount_(logicalLocalCount) {
+      : DistributedVmmArena(VmmLayout<Scalar>::compute(logicalLocalCount,
+                                                       ipcMode, comm)) {}
+
+  explicit DistributedVmmArena(VmmLayout<Scalar> layout)
+      : layout_(std::move(layout)), comm_(layout_.comm()),
+        ipcMode_(layout_.ipcMode()) {
 #ifndef HAVE_MPI
     throw std::runtime_error("VMM distributed arena requires MPI in this experiment");
 #else
-    rank_ = comm_.rank();
-    size_ = comm_.size();
+    rank_ = layout_.rank();
+    size_ = layout_.size();
+    cuDevice_ = layout_.device();
 
+    // A layout can be computed ahead of arena construction. Verify that the
+    // active GPU has not changed before allocating with its stored device id.
     VMM_CU_CHECK(comm_, cuInit(0));
     int runtimeDev = 0;
     VMM_CUDART_CHECK(comm_, cudaGetDevice(&runtimeDev));
-    VMM_CU_CHECK(comm_, cuDeviceGet(&cuDevice_, runtimeDev));
-
-    CUmemAllocationHandleType shareType = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
-    if (ipcMode_ == IpcMode::Fabric) {
-#if CUDA_VERSION >= 12040
-      shareType = CU_MEM_HANDLE_TYPE_FABRIC;
-#else
-      throw std::runtime_error("--vmm-ipc=fabric requires CUDA 12.4+ headers");
-#endif
+    CUdevice activeDevice = 0;
+    VMM_CU_CHECK(comm_, cuDeviceGet(&activeDevice, runtimeDev));
+    if (activeDevice != cuDevice_) {
+      abortWithMessage(comm_, "VMM layout was computed for a different CUDA device");
     }
 
     CUmemAllocationProp prop {};
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     prop.location.id = cuDevice_;
-    prop.requestedHandleTypes = shareType;
+    prop.requestedHandleTypes = layout_.handleType();
 
-    std::size_t localGran = 0;
-    VMM_CU_CHECK(comm_, cuMemGetAllocationGranularity(&localGran, &prop,
-                                                CU_MEM_ALLOC_GRANULARITY_MINIMUM));
-
-    unsigned long long localGranUll = static_cast<unsigned long long>(localGran);
-    std::vector<unsigned long long> allGran(size_);
-    MPI_Allgather(&localGranUll, 1, MPI_UNSIGNED_LONG_LONG,
-                  allGran.data(), 1, MPI_UNSIGNED_LONG_LONG, comm_.mpi());
-
-    std::uint64_t commonGran = 1;
-    for (const auto g : allGran) commonGran = std::lcm(commonGran, static_cast<std::uint64_t>(g));
-    granularity_ = static_cast<std::size_t>(commonGran);
-
-    const std::uint64_t requestedBytes =
-        static_cast<std::uint64_t>(logicalLocalCount_) * sizeof(Scalar);
-    localBytes_ = static_cast<std::size_t>(roundUp(requestedBytes, commonGran));
-    // cuMemCreate does not accept a zero-byte physical allocation.  Preserve a
-    // valid padded slot even for an empty rank; logicalLocalCount_ remains 0.
-    if (localBytes_ == 0) localBytes_ = granularity_;
-
-    unsigned long long localBytesUll = static_cast<unsigned long long>(localBytes_);
-    std::vector<unsigned long long> bytesByRankUll(size_);
-    MPI_Allgather(&localBytesUll, 1, MPI_UNSIGNED_LONG_LONG,
-                  bytesByRankUll.data(), 1, MPI_UNSIGNED_LONG_LONG, comm_.mpi());
-
-    bytesByRank_.resize(size_);
-    baseElements_.resize(size_);
-    std::uint64_t runningBytes = 0;
-    for (int p = 0; p < size_; ++p) {
-      bytesByRank_[p] = static_cast<std::size_t>(bytesByRankUll[p]);
-      if (runningBytes % sizeof(Scalar) != 0) abortWithMessage(comm_, "VMM byte offset is not Scalar-aligned");
-      baseElements_[p] = runningBytes / sizeof(Scalar);
-      runningBytes += bytesByRank_[p];
-    }
-    totalBytes_ = static_cast<std::size_t>(runningBytes);
-    totalElements_ = runningBytes / sizeof(Scalar);
-
-    VMM_CU_CHECK(comm_, cuMemCreate(&localHandle_, localBytes_, &prop, 0));
+    // Layout is already finalized: no rank counts, CUDA granularities,
+    // padding, or address offsets are recomputed by the arena.
+    VMM_CU_CHECK(comm_, cuMemCreate(&localHandle_, layout_.localBytes(), &prop, 0));
 
     handles_.resize(size_);
     handles_[rank_] = localHandle_;
@@ -414,26 +293,26 @@ class DistributedVmmArena {
 #endif
     }
 
-    VMM_CU_CHECK(comm_, cuMemAddressReserve(&baseVa_, totalBytes_, granularity_, 0, 0));
+    VMM_CU_CHECK(comm_, cuMemAddressReserve(&baseVa_, layout_.totalBytes(), layout_.granularity(), 0, 0));
 
     std::uint64_t byteOffset = 0;
     for (int p = 0; p < size_; ++p) {
-      VMM_CU_CHECK(comm_, cuMemMap(baseVa_ + byteOffset, bytesByRank_[p], 0, handles_[p], 0));
-      byteOffset += bytesByRank_[p];
+      VMM_CU_CHECK(comm_, cuMemMap(baseVa_ + byteOffset, layout_.bytesByRank()[p], 0, handles_[p], 0));
+      byteOffset += layout_.bytesByRank()[p];
     }
 
     CUmemAccessDesc access {};
     access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     access.location.id = cuDevice_;
     access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-    VMM_CU_CHECK(comm_, cuMemSetAccess(baseVa_, totalBytes_, &access, 1));
+    VMM_CU_CHECK(comm_, cuMemSetAccess(baseVa_, layout_.totalBytes(), &access, 1));
 
     globalPtr_ = reinterpret_cast<Scalar*>(baseVa_);
-    localPtr_  = globalPtr_ + baseElements_[rank_];
+    localPtr_  = globalPtr_ + layout_.baseElements()[rank_];
 
     if (rank_ == 0) {
-      std::cout << "VMM arena: granularity=" << granularity_
-                << " bytes, total mapped=" << totalBytes_
+      std::cout << "VMM arena: granularity=" << layout_.granularity()
+                << " bytes, total mapped=" << layout_.totalBytes()
                 << " bytes, IPC=" << (ipcMode_ == IpcMode::Posix ? "posix" : "fabric")
                 << std::endl;
     }
@@ -448,16 +327,16 @@ class DistributedVmmArena {
     std::uint64_t byteOffset = 0;
     for (int p = 0; p < size_; ++p) {
       // Destructor must not throw.  Print failures and continue best-effort.
-      CUresult e = cuMemUnmap(baseVa_ + byteOffset, bytesByRank_[p]);
+      CUresult e = cuMemUnmap(baseVa_ + byteOffset, layout_.bytesByRank()[p]);
       if (e != CUDA_SUCCESS) {
         const char* s = nullptr;
         cuGetErrorString(e, &s);
         std::fprintf(stderr, "rank %d: cuMemUnmap failed during teardown: %s\n",
                      rank_, s ? s : "unknown");
       }
-      byteOffset += bytesByRank_[p];
+      byteOffset += layout_.bytesByRank()[p];
     }
-    cuMemAddressFree(baseVa_, totalBytes_);
+    cuMemAddressFree(baseVa_, layout_.totalBytes());
     baseVa_ = 0;
 
     for (auto h : handles_) cuMemRelease(h);
@@ -469,27 +348,22 @@ class DistributedVmmArena {
 
   Scalar* globalPtr() const { return globalPtr_; }
   Scalar* localPtr() const { return localPtr_; }
-  std::size_t logicalLocalCount() const { return logicalLocalCount_; }
-  std::uint64_t totalElements() const { return totalElements_; }
-  const std::vector<std::uint64_t>& baseElements() const { return baseElements_; }
+  std::size_t logicalLocalCount() const { return layout_.logicalLocalCount(); }
+  std::uint64_t totalElements() const { return layout_.totalElements(); }
+  const std::vector<std::uint64_t>& baseElements() const { return layout_.baseElements(); }
+  const VmmLayout<Scalar>& layout() const { return layout_; }
   int rank() const { return rank_; }
   int size() const { return size_; }
 
  private:
+  VmmLayout<Scalar> layout_;
   VmmComm comm_;
   IpcMode ipcMode_;
   int rank_ = 0;
   int size_ = 1;
   CUdevice cuDevice_ = 0;
-  std::size_t logicalLocalCount_ = 0;
-  std::size_t granularity_ = 0;
-  std::size_t localBytes_ = 0;
-  std::size_t totalBytes_ = 0;
-  std::uint64_t totalElements_ = 0;
   CUmemGenericAllocationHandle localHandle_ {};
   std::vector<CUmemGenericAllocationHandle> handles_;
-  std::vector<std::size_t> bytesByRank_;
-  std::vector<std::uint64_t> baseElements_;
   CUdeviceptr baseVa_ = 0;
   Scalar* globalPtr_ = nullptr;
   Scalar* localPtr_ = nullptr;
