@@ -319,6 +319,14 @@ class Behavior {
   /// The VMM code interprets this value (currently "posix" or "fabric").
   static std::string experimentalVmmIpc();
 
+  /// \brief DO NOT COMMIT - Make Apply Synchronous.
+  ///
+  /// Controlled by TPETRA_SYNCHRONIZE_APPLY; defaults to off.
+  /// adds an apply region timer
+  /// Imposes a fence + barrier before the apply region timer
+  /// imposes a fence before stopping the timer region
+  static bool synchronizeApply();
+
   /// \brief Warn if more than this many Kokkos spaces are accessed.
   ///
   /// This is disabled by default.  You may control this at run time via the
