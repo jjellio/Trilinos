@@ -30,7 +30,6 @@
 #include <memory>  // std::shared_ptr
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
-#pragma message("TPETRA_ENABLE_EXPERIMENTAL_VMM")
 namespace VmmExperiment {
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 class VmmSpmvContext;
