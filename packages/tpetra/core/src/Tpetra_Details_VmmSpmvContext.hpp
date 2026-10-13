@@ -1,29 +1,52 @@
-// Experimental VMM-backed local CRS SpMV with an MPI-scoped arena.
-// The matrix owns this context in the eventual CrsMatrix integration; the
-// context *borrows* its finalized local CSR storage, not the matrix itself.
+// Experimental, allocation-independent VMM-addressed local CRS SpMV.
+// The matrix owns the translated column indices and borrows its own row map
+// and values.  The input vector (and its VMM allocation) will be supplied
+// at apply time, once native VMM-backed MultiVectors are implemented.
 #ifndef TPETRA_EXPERIMENT_VMM_SPMV_CONTEXT_HPP
 #define TPETRA_EXPERIMENT_VMM_SPMV_CONTEXT_HPP
 
 #ifdef HAVE_TPETRA_INST_CUDA
 
-#include "Tpetra_Details_VmmDistributedArena.hpp"
+#include "Tpetra_Details_VmmLayout.hpp"
 #include "Tpetra_Details_VmmMatrixInfo.hpp"
 #include "Tpetra_CrsMatrix_fwd.hpp"
 #include "Tpetra_DistObject_fwd.hpp"
 #include "Tpetra_MultiVector.hpp"
 #include "KokkosSparse_CrsMatrix.hpp"
 #include "KokkosSparse_spmv.hpp"
+#include <algorithm>
+#include <cstdint>
+#include <iomanip>
+#include <iostream>
 #include <limits>
+#include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <type_traits>
-
-#ifdef TPETRA_ENABLE_NCCL
-#include <nccl.h>
-#endif
-#ifdef VMM_PTHREAD_BARRIER
-#include <pthread.h>
-#endif
+#include <utility>
+#include <vector>
 
 namespace VmmExperiment {
+
+// KokkosSparse CRS ordinals are signed, and numCols() has the ordinal
+// type as well.  Test the full (padded) global X extent, not just the
+// largest column referenced by this rank.  A large local row count also
+// requires the wider ordinal, independent of the Tpetra LocalOrdinal.
+enum class VmmCrsOrdinalWidth { Int32, Int64, Unsupported };
+
+inline VmmCrsOrdinalWidth chooseVmmCrsOrdinalWidth(
+    std::uint64_t totalElements, std::uint64_t localNumRows) {
+  const auto extent = std::max(totalElements, localNumRows);
+  if (extent <= static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int32_t>::max())) {
+    return VmmCrsOrdinalWidth::Int32;
+  }
+  if (extent <= static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max())) {
+    return VmmCrsOrdinalWidth::Int64;
+  }
+  return VmmCrsOrdinalWidth::Unsupported;
+}
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 class VmmSpmvContext {
@@ -37,27 +60,35 @@ class VmmSpmvContext {
   using local_matrix_type = typename matrix_type::local_matrix_device_type;
   using device_type = typename local_matrix_type::device_type;
   using memory_space = typename device_type::memory_space;
-  using entries_type = typename local_matrix_type::index_type::non_const_type;
+  // The VMM column ordinal is deliberately independent of Tpetra's LO.
+  // Preserve the original row-offset and value types in both variants.
+  template <class VmmOrdinal>
+  struct AddressedCrs {
+    using entries_type = Kokkos::View<VmmOrdinal*, device_type>;
+    using matrix_type = KokkosSparse::CrsMatrix<
+        typename local_matrix_type::value_type,
+        VmmOrdinal,
+        device_type,
+        Kokkos::MemoryTraits<Kokkos::Unmanaged>,
+        typename local_matrix_type::size_type>;
 
-  // Do not retain managed Kokkos views into Tpetra's WrappedDualView storage.
-  // The source matrix owns its row pointers and values; VMM borrows them.
-  using unmanaged_matrix_type = KokkosSparse::CrsMatrix<
-      typename local_matrix_type::value_type,
-      typename local_matrix_type::ordinal_type,
-      device_type,
-      Kokkos::MemoryTraits<Kokkos::Unmanaged>,
-      typename local_matrix_type::size_type>;
-  using unmanaged_vector_type =
-      Kokkos::View<impl_scalar_type*, device_type, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    entries_type entries;  // owns translated column indices
+    matrix_type matrix;    // borrows Tpetra row offsets and values
+  };
 
-  static_assert(std::is_integral<LO>::value && std::is_signed<LO>::value,
-                "KokkosSparse local ordinal must be a signed integer");
+  using global_vector_type = Kokkos::View<
+      const impl_scalar_type*, device_type,
+      Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
-  VmmSpmvContext(const matrix_type& A, IpcMode ipcMode)
-      : comm_(A.getDomainMap()->getComm()),
-        arena_(A.getDomainMap()->getLocalNumElements(), ipcMode, comm_) {
+  VmmSpmvContext(const matrix_type& A, VmmLayout<impl_scalar_type> layout)
+      : comm_(layout.comm()), layout_(std::move(layout)) {
     rank_ = comm_.rank();
     size_ = comm_.size();
+    if (layout_.logicalLocalCount() !=
+        A.getDomainMap()->getLocalNumElements()) {
+      throw std::invalid_argument(
+          "VMM SpMV layout does not match the matrix domain Map");
+    }
     buildAddressedMatrix(A);
 
     const auto& analysis = TpetraMatrixInfo::analyzeAccessPattern(A);
@@ -98,290 +129,172 @@ class VmmSpmvContext {
 
     
 
-    xGlobal_ = unmanaged_vector_type(arena_.globalPtr(), arena_.totalElements());
-    xLocal_  = unmanaged_vector_type(arena_.localPtr(), arena_.logicalLocalCount());
-    // test faulting it
-    Kokkos::deep_copy(xLocal_, Scalar(0));
-
-    #ifdef TPETRA_ENABLE_NCCL
-    // optional nccl setup
-    #pragma message("Enabling NCCL in VmmContext")
-
-    Kokkos::Cuda exec;
-    stream_ = exec.cuda_stream();
-    cudaMalloc(&nccl_barrier_buf_, sizeof(int));
-    cudaMemset(nccl_barrier_buf_, 0, sizeof(int));
-
-    if (rank_ == 0)
-        ncclGetUniqueId(&nccl_id_);
-    
-    MPI_Bcast(&nccl_id_, sizeof(nccl_id_), MPI_BYTE, 0, comm_.mpi());
-    
-    ncclCommInitRank(
-        &nccl_comm_,
-        size_,
-        nccl_id_,
-        rank_);
-    #endif
-
-//    #ifdef VMM_PTHREAD_BARRIER
-//    // Only rank 0 allocates storage.
-//    MPI_Aint size = (rank == 0)
-//        ? sizeof(pthread_barrier_t)
-//        : 0;
-//    
-//    void* base;
-//    MPI_Win win;
-//    
-//    MPI_Win_allocate_shared(
-//        size, 1, MPI_INFO_NULL,
-//        node_comm, &base, &win
-//    );
-//    
-//    // Obtain rank 0's shared address.
-//    MPI_Aint shared_size;
-//    int disp_unit;
-//    void* shared;
-//    
-//    MPI_Win_shared_query(
-//        win, 0, &shared_size, &disp_unit, &shared
-//    );
-//    
-//    auto* barrier =
-//        static_cast<pthread_barrier_t*>(shared);
-//    
-//    if (rank == 0) {
-//        pthread_barrierattr_t attr;
-//        pthread_barrierattr_init(&attr);
-//    
-//        pthread_barrierattr_setpshared(
-//            &attr, PTHREAD_PROCESS_SHARED
-//        );
-//    
-//        pthread_barrier_init(barrier, &attr, nranks);
-//        pthread_barrierattr_destroy(&attr);
-//    }
-//    
-//    // One-time initialization synchronization.
-//    MPI_Barrier(node_comm);
-//    
-//    // Steady-state barrier: no MPI calls.
-//    // pthread_barrier_wait(barrier);
-//
-//    #endif
-
   }
 
-  virtual ~VmmSpmvContext() {
-    #ifdef TPETRA_ENABLE_NCCL
-    cudaFree(nccl_barrier_buf_);
-    ncclCommDestroy(nccl_comm_);
-    #endif
-   }
-  // Publish the current Tpetra vector into this rank's physical VMM allocation.
-  // This is scaffolding for the first implementation; a native VMM-backed
-  // Tpetra/solver vector would eliminate this deep copy.
-  void publish(const multivector_type& x) {
+  // The context owns no CUDA allocation or virtual mappings.  The caller
+  // must supply a compatible, peer-readable global X pointer and arrange
+  // synchronization before invoking this method.  Milestone 3 will wire
+  // this to native VMM-backed Tpetra Vector/MultiVector storage.
+  const VmmLayout<impl_scalar_type>& layout() const { return layout_; }
+  bool uses64BitCrsOrdinals() const { return static_cast<bool>(crs64_); }
 
-    auto x2d = x.getLocalViewDevice(Tpetra::Access::ReadOnly);
-    
-    if (x2d.extent(1) != 1 ||
-        x2d.extent(0) != xLocal_.extent(0)) {
-        throw std::runtime_error(
-            "VMM publish: unexpected Tpetra vector local shape");
+  void applyGlobalPointer(const impl_scalar_type* globalX,
+                          multivector_type& y,
+                          const Scalar alpha, const Scalar beta) const {
+    if (globalX == nullptr) {
+      throw std::invalid_argument("VMM SpMV requires a mapped global X pointer");
     }
-    {
-      Teuchos::TimeMonitor timer(
-      *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: publish: deep_copy"));
-      auto x1d = Kokkos::subview(x2d, Kokkos::ALL(), 0);
-    
-      // Synchronous by Kokkos definition.
-      Kokkos::deep_copy(xLocal_, x1d);
+    if (!crs32_ && !crs64_) {
+      throw std::logic_error("VMM SpMV context has no addressed CRS matrix");
     }
-
-    #ifdef TPETRA_ENABLE_NCCL
-    {
-      Teuchos::TimeMonitor timer(
-      *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: publish: barrier NCCL"));
-      // Establish a simple global epoch: all owner writes are complete before any
-      // rank starts ordinary remote loads.  This is intentionally conservative.
-      //MPI_Barrier(comm_.mpi());
-      ncclResult_t rc = ncclAllReduce(
-          nccl_barrier_buf_,
-          nccl_barrier_buf_,
-          1,
-          ncclInt32,
-          ncclSum,
-          nccl_comm_,
-          stream_);
-  
-      if (rc != ncclSuccess)
-          throw std::runtime_error(ncclGetErrorString(rc));
-  
-      // Blocks CPU until NCCL collective completes.
-      Kokkos::fence("Tpetra VMM: publish: barrier NCCL");
-      return;
-      // you want to return here
-    }
-    #elif defined(HAVE_MPI)
-    { 
-      Teuchos::TimeMonitor timer(
-      *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: publish: barrier MPI"));
-      // Establish a simple global epoch: all owner writes are complete before any
-      // rank starts ordinary remote loads.  This is intentionally conservative.
-      MPI_Barrier(comm_.mpi());
-      return;
-    }
-    #endif
-  }
-
-  void applyPublished(multivector_type& y, const Scalar alpha, const Scalar beta) const {
-    auto y2d = y.getLocalViewDevice(Tpetra::Access::OverwriteAll);
-    if (y2d.extent(1) != 1 || y2d.extent(0) != static_cast<std::size_t>(vmmA_.numRows())) {
-      throw std::runtime_error("VMM SpMV: unexpected Tpetra output vector local shape");
+    const global_vector_type xGlobal(globalX, layout_.totalElements());
+    // ReadWrite also preserves Y for beta != 0; OverwriteAll is not valid
+    // for that case if the freshest copy of Y lives on the host.
+    auto y2d = y.getLocalViewDevice(Tpetra::Access::ReadWrite);
+    if (y2d.extent(1) != 1 ||
+        y2d.extent(0) != static_cast<std::size_t>(
+            crs32_ ? crs32_->matrix.numRows() : crs64_->matrix.numRows())) {
+      throw std::runtime_error("VMM SpMV: unexpected output vector local shape");
     }
     auto y1d = Kokkos::subview(y2d, Kokkos::ALL(), 0);
-
-
-    using ATS = KokkosKernels::ArithTraits<impl_scalar_type>;
-
-    //const auto one  = ATS::one();
-    //const auto zero = ATS::zero();
-
-    KokkosSparse::spmv("N", alpha, vmmA_, xGlobal_, beta, y1d);
-    //Kokkos::fence("VMM direct SpMV fence");
-  }
-
-  void apply(const multivector_type& x, multivector_type& y, const Scalar alpha, const Scalar beta) {
-    publish(x);
-    applyPublished(y,alpha,beta);
+    if (crs32_) {
+      KokkosSparse::spmv("N", alpha, crs32_->matrix, xGlobal, beta, y1d);
+    } else {
+      KokkosSparse::spmv("N", alpha, crs64_->matrix, xGlobal, beta, y1d);
+    }
   }
 
  private:
+  // Build an independent signed-index CRS.  The original Tpetra matrix
+  // continues using its own LO for ordinary local/Import-based SpMV.
+  template <class VmmOrdinal>
+  std::unique_ptr<AddressedCrs<VmmOrdinal>> makeAddressedCrs(
+      const local_matrix_type& localA,
+      const std::vector<std::uint64_t>& colLidToVmm) {
+    using addressed_type = AddressedCrs<VmmOrdinal>;
+    auto crs = std::make_unique<addressed_type>();
+    const std::size_t nnz = localA.nnz();
+    crs->entries = typename addressed_type::entries_type(
+        "VMM direct column ordinals", nnz);
+
+    auto entriesHost = Kokkos::create_mirror_view_and_copy(
+        Kokkos::HostSpace(), localA.graph.entries);
+    auto vmmEntriesHost = Kokkos::create_mirror_view(crs->entries);
+    for (std::size_t k = 0; k < nnz; ++k) {
+      const LO colLid = entriesHost(k);
+      if (colLid < 0 || static_cast<std::size_t>(colLid) >= colLidToVmm.size()) {
+        throw std::runtime_error(
+            "Local CRS column ordinal is outside the Tpetra column Map");
+      }
+      // The width was selected using the full padded extent, so every
+      // translated index is representable in this signed ordinal type.
+      vmmEntriesHost(k) =
+          static_cast<VmmOrdinal>(colLidToVmm[static_cast<std::size_t>(colLid)]);
+    }
+    Kokkos::deep_copy(crs->entries, vmmEntriesHost);
+    Kokkos::fence("build VMM column ordinals");
+
+    // KokkosSparse's numRows/numCols are also VmmOrdinal.  The width
+    // selection covers both dimensions and the full padded X extent.
+    const auto numRows = static_cast<VmmOrdinal>(localA.numRows());
+    const auto numCols = static_cast<VmmOrdinal>(layout_.totalElements());
+
+    // Unmanaged views borrow Tpetra row offsets and values; the separate
+    // managed entries View above owns only the translated CRS ordinals.
+    using values_view = typename addressed_type::matrix_type::values_type;
+    using row_map_view = typename addressed_type::matrix_type::row_map_type;
+    using indices_view = typename addressed_type::matrix_type::index_type;
+    const values_view values(localA.values.data(), localA.values.extent(0));
+    const row_map_view rowMap(localA.graph.row_map.data(),
+                              localA.graph.row_map.extent(0));
+    const indices_view indices(crs->entries.data(), crs->entries.extent(0));
+    crs->matrix = typename addressed_type::matrix_type(
+        "VMM addressed local matrix", numRows, numCols, nnz,
+        values, rowMap, indices);
+    return crs;
+  }
+
   void buildAddressedMatrix(const matrix_type& A) {
     auto domainMap = A.getDomainMap();
-    auto colMap    = A.getColMap();
+    auto colMap = A.getColMap();
 
     if (!domainMap->isContiguous()) {
       throw std::runtime_error(
-          "VMM prototype currently requires a contiguous Tpetra domain Map. "
-          "The built-in miniFE generator satisfies this; general Maps can be "
-          "supported later with Tpetra owner/LID lookup metadata.");
+          "VMM prototype requires a contiguous Tpetra domain Map");
     }
 
+    // Rank counts and padded offsets are already in VmmLayout.  Gather
+    // only the first GID of each rank's domain segment to resolve
+    // column-Map GIDs to owner/local pairs.
     const std::size_t myCount = domainMap->getLocalNumElements();
     auto myGids = domainMap->getLocalElementList();
     long long myFirst = 0;
     if (myCount != 0) myFirst = static_cast<long long>(myGids[0]);
-
-    std::vector<unsigned long long> counts(size_);
     std::vector<long long> firstGid(size_);
-    unsigned long long myCountUll = static_cast<unsigned long long>(myCount);
 #ifdef HAVE_MPI
-    MPI_Allgather(&myCountUll, 1, MPI_UNSIGNED_LONG_LONG,
-                  counts.data(), 1, MPI_UNSIGNED_LONG_LONG, comm_.mpi());
     MPI_Allgather(&myFirst, 1, MPI_LONG_LONG,
                   firstGid.data(), 1, MPI_LONG_LONG, comm_.mpi());
 #else
-    counts[0] = myCountUll;
     firstGid[0] = myFirst;
 #endif
 
-    if (arena_.totalElements() > static_cast<std::uint64_t>(std::numeric_limits<LO>::max())) {
-      throw std::runtime_error(
-          "Padded VMM arena exceeds the 32-bit/signed LocalOrdinal range. "
-          "Use a wider VMM ordinal for this configuration.");
-    }
-
+    const auto& counts = layout_.logicalCounts();
     const std::size_t numColLids = colMap->getLocalNumElements();
-    std::vector<LO> colLidToVmm(numColLids);
+    std::vector<std::uint64_t> colLidToVmm(numColLids);
     auto colGids = colMap->getLocalElementList();
-    const auto& base = arena_.baseElements();
 
     for (std::size_t lid = 0; lid < numColLids; ++lid) {
       const long long gid = static_cast<long long>(colGids[lid]);
       int owner = -1;
       std::uint64_t ownerLocal = 0;
       for (int p = 0; p < size_; ++p) {
-        if (counts[p] == 0) continue;
-        const long long begin = firstGid[p];
-        const long long end   = begin + static_cast<long long>(counts[p]);
-        if (gid >= begin && gid < end) {
+        if (counts[p] == 0 || gid < firstGid[p]) continue;
+        // Compare unsigned offsets rather than adding counts to a signed
+        // GID; the latter could overflow for a large contiguous domain.
+        const auto offset = static_cast<std::uint64_t>(gid) -
+                            static_cast<std::uint64_t>(firstGid[p]);
+        if (offset < counts[p]) {
           owner = p;
-          ownerLocal = static_cast<std::uint64_t>(gid - begin);
+          ownerLocal = offset;
           break;
         }
       }
       if (owner < 0) {
-        throw std::runtime_error("Failed to resolve a column-map GID to a domain-map owner");
+        throw std::runtime_error(
+            "Failed to resolve a column-map GID to a domain-map owner");
       }
-      const std::uint64_t addressOrdinal = base[owner] + ownerLocal;
-      if (addressOrdinal > static_cast<std::uint64_t>(std::numeric_limits<LO>::max())) {
-        throw std::runtime_error("VMM address ordinal exceeds LocalOrdinal range");
-      }
-      colLidToVmm[lid] = static_cast<LO>(addressOrdinal);
+      colLidToVmm[lid] = layout_.globalIndex(owner, ownerLocal);
     }
 
-    // Acquire managed Tpetra views only for the duration of this method.
-    // They are released on return, so subsequent getLocalMatrixHost() calls
-    // do not encounter a permanently live view of CrsGraph::lclInds.
+    // Acquire Tpetra's managed views only within this function.  Our
+    // stored CRS representations retain unmanaged aliases, so later
+    // getLocalMatrixHost() calls are not blocked by a live managed view.
     const auto localA = A.getLocalMatrixDevice();
-    const std::size_t nnz = localA.nnz();
-    vmmEntries_ = entries_type("VMM direct column ordinals", nnz);
-
-    auto entriesHost = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                                                            localA.graph.entries);
-    auto vmmEntriesHost = Kokkos::create_mirror_view(vmmEntries_);
-    for (std::size_t k = 0; k < nnz; ++k) {
-      const LO colLid = entriesHost(k);
-      if (colLid < 0 || static_cast<std::size_t>(colLid) >= colLidToVmm.size()) {
-        throw std::runtime_error("Local CRS column ordinal is outside the Tpetra column Map");
-      }
-      vmmEntriesHost(k) = colLidToVmm[static_cast<std::size_t>(colLid)];
+    const auto width = chooseVmmCrsOrdinalWidth(
+        layout_.totalElements(), static_cast<std::uint64_t>(localA.numRows()));
+    if (width == VmmCrsOrdinalWidth::Int32) {
+      crs32_ = makeAddressedCrs<std::int32_t>(localA, colLidToVmm);
+    } else if (width == VmmCrsOrdinalWidth::Int64) {
+      crs64_ = makeAddressedCrs<std::int64_t>(localA, colLidToVmm);
+    } else {
+      throw std::runtime_error(
+          "VMM CRS dimensions exceed signed 64-bit indexing");
     }
-    Kokkos::deep_copy(vmmEntries_, vmmEntriesHost);
-    Kokkos::fence("build VMM column ordinals");
-
-    const LO numRows = static_cast<LO>(localA.numRows());
-    const LO numCols = static_cast<LO>(arena_.totalElements());
-
-    // The VMM matrix contains only UNMANAGED views.  Construct each view
-    // from a raw pointer, not by copying managed views from localA.  The
-    // translated column indices are allocated and owned by vmmEntries_.
-    // The original row offsets and values remain owned by the CrsMatrix.
-    using values_view = typename unmanaged_matrix_type::values_type;
-    using row_map_view = typename unmanaged_matrix_type::row_map_type;
-    using indices_view = typename unmanaged_matrix_type::index_type;
-    const values_view values(localA.values.data(), localA.values.extent(0));
-    const row_map_view rowMap(localA.graph.row_map.data(),
-                              localA.graph.row_map.extent(0));
-    const indices_view indices(vmmEntries_.data(), vmmEntries_.extent(0));
-
-    vmmA_ = unmanaged_matrix_type("VMM addressed local matrix",
-                                  numRows, numCols, nnz,
-                                  values, rowMap, indices);
 
     if (rank_ == 0) {
-      std::cout << "VMM CRS translation: reusing Tpetra row_map + values; "
-                << "translated local column ordinals now index padded global VMM X"
+      std::cout << "VMM CRS translation: borrowing Tpetra row_map + values; "
+                << (crs32_ ? "signed 32-bit" : "signed 64-bit")
+                << " addressed column ordinals, no VMM X allocation"
                 << std::endl;
     }
   }
 
   VmmComm comm_;
-  DistributedVmmArena<impl_scalar_type> arena_;
-  entries_type vmmEntries_;
-  unmanaged_matrix_type vmmA_;
-  unmanaged_vector_type xGlobal_;
-  unmanaged_vector_type xLocal_;
+  VmmLayout<impl_scalar_type> layout_;
+  std::unique_ptr<AddressedCrs<std::int32_t>> crs32_;
+  std::unique_ptr<AddressedCrs<std::int64_t>> crs64_;
   int rank_ = 0;
   int size_ = 1;
-  #ifdef TPETRA_ENABLE_NCCL
-  ncclUniqueId nccl_id_;
-  ncclComm_t nccl_comm_ = nullptr;
-  int* nccl_barrier_buf_ = nullptr;
-  cudaStream_t stream_ = nullptr;
-  #endif
 };
 
 }  // namespace VmmExperiment

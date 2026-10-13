@@ -4227,13 +4227,13 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 }
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
-// Construction-only VMM hook.  Ordinary Tpetra apply remains in use.
-// All ranks in the matrix communicator must enable the same VMM behavior.
-// The arena currently requires collective construction AND destruction.
+// Construct only the VMM-addressed CRS representation at fillComplete.
+// No vector arena, CUDA virtual address reservation, or IPC mapping occurs.
+// All ranks must enable the same experimental VMM layout computation.
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     initializeVmmContext(const Teuchos::RCP<Teuchos::ParameterList>& /*params*/) {
-  // No allocation or MPI collective unless VMM is enabled via Tpetra Behavior.
+  // No VMM metadata collective unless enabled via Tpetra Behavior.
   if (!Details::Behavior::experimentalVmm()) {
     return;
   }
@@ -4256,9 +4256,8 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     const auto rowMap = this->getRowMap();
     const auto rangeMap = this->getRangeMap();
     const auto comm = this->getComm();
-    // Every participating rank reaches these collectives when VMM is enabled.
-    // Collectively reject matrices the current VMM address translation cannot
-    // represent.  Do this before the arena's own MPI collectives begin.
+    // Collectively reject Maps that the prototype address translation
+    // cannot represent before gathering the VMM layout metadata.
     int localEligible = 0;
     if (!domainMap.is_null() && !colMap.is_null() &&
         !rowMap.is_null() && !rangeMap.is_null() &&
@@ -4300,11 +4299,23 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
         ? VmmExperiment::IpcMode::Posix
         : VmmExperiment::IpcMode::Fabric;
     */
-    // Context owns its arena, aliased CSR values/rowptr, and VMM indices.
-    // It does not own the CrsMatrix itself.
+    // Compute the deterministic plan without creating an arena.  Both the
+    // matrix and a later VMM-backed Vector will use this same layout policy.
+    VmmExperiment::VmmComm vmmComm(domainMap->getComm());
+    auto layout = VmmExperiment::VmmLayout<impl_scalar_type>::compute(
+        domainMap->getLocalNumElements(), ipcMode, vmmComm);
+
+    // KokkosSparse::CrsMatrix uses a signed ordinal for numCols() as well
+    // as column indices.  Unsupported extents use ordinary Tpetra apply.
+    // Every rank computed the same total padded extent.
+    if (layout.totalElements() > static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max())) return;
+
+    // The context owns translated CRS indices and borrows Tpetra values /
+    // row offsets; no CUDA physical or virtual vector storage is allocated.
     {
-    Teuchos::TimeMonitor timer(*Teuchos::TimeMonitor::getNewTimer("vmmContext Ctor"));
-    vmmContext_ = std::make_shared<vmm_context_type>(*this, ipcMode);
+      Teuchos::TimeMonitor timer(*Teuchos::TimeMonitor::getNewTimer("vmmContext Ctor"));
+      vmmContext_ = std::make_shared<vmm_context_type>(*this, std::move(layout));
     }
     /*
     std::fprintf(stderr,
@@ -4652,47 +4663,16 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 }
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
-// Experimental, conservative VMM dispatch.  Unsupported operations use the
-// ordinary Tpetra Import / local SpMV / Export path.
+// Milestone 2 constructs only the VMM-addressed matrix; the source X is
+// still a normal Tpetra MultiVector.  Until milestone 3 provides native VMM
+// storage, never use the VMM matrix with an unmapped/global X pointer.
+// Normal Tpetra Import / local SpMV / Export is the intentional fallback.
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
-    tryApplyVmm(const MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& X_in,
-                MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& Y_in,
-                Scalar alpha, Scalar beta) const {
-#if defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
-    /*
-    std::fprintf(stderr,
-        "VMM APPLY: rank=%d matrix=%p context=%p sizeof=%zu\n",
-        this->getComm()->getRank(),
-        static_cast<const void*>(this),
-        static_cast<const void*>(vmmContext_.get()),
-        sizeof(*this));
-    */
-
-    //const Scalar ZERO = Teuchos::ScalarTraits<Scalar>::zero();
-    //const Scalar ONE  = Teuchos::ScalarTraits<Scalar>::one();
-    const auto domainMap = this->getDomainMap();
-    const auto rangeMap  = this->getRangeMap();
-    const auto xMap      = X_in.getMap();
-    const auto yMap      = Y_in.getMap();
-
-    Details::ProfilingRegion regionVmm("Tpetra::CrsMatrix::apply: VMM");
-    //vmmContext_->apply(X_in, Y_in);  // publish + barrier + KokkosSparse SpMV
-    {
-      Teuchos::TimeMonitor timer(
-          *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: publish"));
-      vmmContext_->publish(X_in);
-    }
-    {
-      Teuchos::TimeMonitor timer(
-          *Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: spmv"));
-      vmmContext_->applyPublished(Y_in,alpha,beta);
-    }
-
-    return true;
-#else  // CUDA + MPI
+    tryApplyVmm(const MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& /*X_in*/,
+                MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& /*Y_in*/,
+                Scalar /*alpha*/, Scalar /*beta*/) const {
   return false;
-#endif
 }
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 
