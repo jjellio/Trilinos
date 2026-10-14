@@ -4696,15 +4696,69 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 }
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
-// Milestone 2 constructs only the VMM-addressed matrix; the source X is
-// still a normal Tpetra MultiVector.  Until milestone 3 provides native VMM
-// storage, never use the VMM matrix with an unmapped/global X pointer.
-// Normal Tpetra Import / local SpMV / Export is the intentional fallback.
+// Direct CUDA VMM SpMV.  Both the dispatch decision and peer access epochs
+// are collective over the matrix communicator.  Unsupported inputs fall
+// through to Tpetra's original Import/local-SpMV/Export implementation.
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
-    tryApplyVmm(const MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& /*X_in*/,
-                MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& /*Y_in*/,
-                Scalar /*alpha*/, Scalar /*beta*/) const {
+    tryApplyVmm(const MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& X_in,
+                MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& Y_in,
+                Scalar alpha, Scalar beta) const {
+#if defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
+  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
+    if (!vmmContext_) return false;
+
+    // Never enter the peer-read barriers on just a subset of ranks.  The
+    // first local failure (including an ordinary X) forces *all* ranks to
+    // execute the classical Tpetra apply path.
+    const auto* xLayout = X_in.getVmmLayout();
+    const auto* xGlobal = X_in.getVmmGlobalPtr();
+    const bool eligible = xLayout != nullptr && xGlobal != nullptr &&
+        X_in.isVmmBacked() &&
+        X_in.getNumVectors() == 1 && Y_in.getNumVectors() == 1 &&
+        Y_in.getLocalLength() == static_cast<std::size_t>(this->getLocalNumRows()) &&
+        X_in.isConstantStride() && Y_in.isConstantStride() &&
+        !X_in.getMap().is_null() && !Y_in.getMap().is_null() &&
+        X_in.getMap().getRawPtr() == this->getDomainMap().getRawPtr() &&
+        Y_in.getMap().getRawPtr() == this->getRangeMap().getRawPtr() &&
+        this->getGraph()->getExporter().is_null() &&
+        this->getRangeMap()->isDistributed() &&
+        &X_in != &Y_in &&
+        (!Y_in.isVmmBacked() || Y_in.getVmmGlobalPtr() != xGlobal) &&
+        vmmContext_->isCompatibleLayout(*xLayout);
+
+    //const int localEligible = eligible ? 1 : 0;
+    //int allEligible = 0;
+    //Teuchos::reduceAll<int, int>(*this->getComm(), Teuchos::REDUCE_MIN,
+    //                             localEligible, Teuchos::outArg(allEligible));
+    if (! eligible) return false;
+
+    // The local Tpetra view aliases the physical VMM allocation.  If its
+    // host mirror contains newer values, this brings them into that same
+    // allocation; it is NOT a publish/copy into a second global arena.
+    // Producer completion must precede MPI's publication barrier, since
+    // MPI_Barrier alone does not complete asynchronous CUDA work.
+    const bool synchronizedApply = Details::Behavior::synchronizeApply();
+    std::optional<Teuchos::TimeMonitor> stageTimer;
+    //if (synchronizedApply) {
+    //  stageTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: barrier"));
+    //}
+    // it's not clear this should be here..
+    //(void)X_in.getLocalViewDevice(Access::ReadOnly);
+    //Kokkos::fence("VMM SpMV: barrier fence");
+    //this->getComm()->barrier();
+    //stageTimer.reset();
+
+    if (synchronizedApply) stageTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: direct spmv"));
+    vmmContext_->applyGlobalPointer(xGlobal, Y_in, alpha, beta);
+
+    return true;
+  }
+#endif
+  (void)X_in;
+  (void)Y_in;
+  (void)alpha;
+  (void)beta;
   return false;
 }
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
@@ -4736,32 +4790,20 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     return;
   }
 
-  #if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && \
-      defined(HAVE_TPETRA_INST_CUDA) && \
-      defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
-  
-    if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
-      if (vmmContext_ && Details::Behavior::experimentalVmm()) {
-        const bool canUseVmm =
-            X_in.getNumVectors() == 1 &&
-            Y_in.getNumVectors() == 1 &&
-            X_in.isConstantStride() &&
-            Y_in.isConstantStride() &&
-            X_in.getMap().getRawPtr() ==
-                this->getDomainMap().getRawPtr() &&
-            Y_in.getMap().getRawPtr() ==
-                this->getRangeMap().getRawPtr() &&
-            this->getGraph()->getExporter().is_null() &&
-            (this->getComm()->getSize() == 1 ||
-             this->getRangeMap()->isDistributed());
-        
-        if (canUseVmm &&
-            this->tryApplyVmm(X_in, Y_in, alpha, beta)) {
-          return;
-        }
-      }
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && \
+    defined(HAVE_TPETRA_INST_CUDA) && \
+    defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
+  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
+    // The matrix's context was constructed collectively at fillComplete.
+    // Native MV allocation is also collective.  Eligibility must be decided
+    // collectively HERE, rather than skipping tryApplyVmm on just one rank.
+    if (vmmContext_ && Details::Behavior::experimentalVmm() &&
+        Details::Behavior::experimentalVmmNativeMv() &&
+        this->tryApplyVmm(X_in, Y_in, alpha, beta)) {
+      return;
     }
-  #endif
+  }
+#endif
 
   // Before comm and local spmv
   const bool synchronize =
@@ -5197,22 +5239,22 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 
   std::optional<Teuchos::TimeMonitor> applyTimer;
 
-  if (synchronize) {
-    applyTimer.emplace(
-        *Teuchos::TimeMonitor::getNewTimer(fnName));
-  }
 
   if (mode == Teuchos::NO_TRANS) {
+    if (synchronize) {
+      applyTimer.emplace(
+          *Teuchos::TimeMonitor::getNewTimer(fnName));
+    }
     ProfilingRegion regionNonTranspose(fnName);
     this->applyNonTranspose(X, Y, alpha, beta);
+    if (synchronize) {
+      Kokkos::fence();
+    }
   } else {
     ProfilingRegion regionTranspose("Tpetra::CrsMatrix::apply (transpose)");
     this->applyTranspose(X, Y, mode, alpha, beta);
   }
 
-  if (synchronize) {
-    Kokkos::fence();
-  }
 }
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>

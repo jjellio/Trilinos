@@ -1,7 +1,6 @@
 // Experimental, allocation-independent VMM-addressed local CRS SpMV.
 // The matrix owns the translated column indices and borrows its own row map
-// and values.  The input vector (and its VMM allocation) will be supplied
-// at apply time, once native VMM-backed MultiVectors are implemented.
+// and values.  Native VMM-backed MultiVectors supply X at apply time.
 #ifndef TPETRA_EXPERIMENT_VMM_SPMV_CONTEXT_HPP
 #define TPETRA_EXPERIMENT_VMM_SPMV_CONTEXT_HPP
 
@@ -10,6 +9,7 @@
 #include "Tpetra_Details_VmmLayout.hpp"
 #include "Tpetra_Details_VmmMatrixInfo.hpp"
 #include "Tpetra_Details_Behavior.hpp"
+#include "Teuchos_ScalarTraits.hpp"
 #include "Tpetra_CrsMatrix_fwd.hpp"
 #include "Tpetra_DistObject_fwd.hpp"
 #include "Tpetra_MultiVector.hpp"
@@ -131,10 +131,28 @@ class VmmSpmvContext {
     }
   }
 
-  // The context owns no CUDA allocation or virtual mappings.  The caller
-  // must supply a compatible, peer-readable global X pointer and arrange
-  // synchronization before invoking this method.  Milestone 3 will wire
-  // this to native VMM-backed Tpetra Vector/MultiVector storage.
+  // Layouts may have unrelated numeric CUDA virtual base addresses on each
+  // MPI rank.  Only their per-rank partitioning and allocation policy must
+  // agree.  A caller must also verify X's domain Map independently.
+  bool isCompatibleLayout(const VmmLayout<impl_scalar_type>& other) const {
+    return layout_.rank() == other.rank() &&
+           layout_.size() == other.size() &&
+           layout_.device() == other.device() &&
+           layout_.ipcMode() == other.ipcMode() &&
+           layout_.granularity() == other.granularity() &&
+           layout_.allocationAlignment() == other.allocationAlignment() &&
+           layout_.logicalLocalCount() == other.logicalLocalCount() &&
+           layout_.localBytes() == other.localBytes() &&
+           layout_.totalBytes() == other.totalBytes() &&
+           layout_.totalElements() == other.totalElements() &&
+           layout_.logicalCounts() == other.logicalCounts() &&
+           layout_.bytesByRank() == other.bytesByRank() &&
+           layout_.baseElements() == other.baseElements();
+  }
+
+  // This context owns no CUDA vector allocation or virtual mappings.  X must
+  // refer to a compatible peer-mapped arena.  Synchronization of producers
+  // and readers is handled by CrsMatrix::tryApplyVmm before/after this call.
   const VmmLayout<impl_scalar_type>& layout() const { return layout_; }
   bool uses64BitCrsOrdinals() const { return static_cast<bool>(crs64_); }
 
@@ -148,19 +166,31 @@ class VmmSpmvContext {
       throw std::logic_error("VMM SpMV context has no addressed CRS matrix");
     }
     const global_vector_type xGlobal(globalX, layout_.totalElements());
-    // ReadWrite also preserves Y for beta != 0; OverwriteAll is not valid
-    // for that case if the freshest copy of Y lives on the host.
-    auto y2d = y.getLocalViewDevice(Tpetra::Access::ReadWrite);
-    if (y2d.extent(1) != 1 ||
-        y2d.extent(0) != static_cast<std::size_t>(
-            crs32_ ? crs32_->matrix.numRows() : crs64_->matrix.numRows())) {
-      throw std::runtime_error("VMM SpMV: unexpected output vector local shape");
-    }
-    auto y1d = Kokkos::subview(y2d, Kokkos::ALL(), 0);
-    if (crs32_) {
-      KokkosSparse::spmv("N", alpha, crs32_->matrix, xGlobal, beta, y1d);
+    // Tpetra's Scalar may differ from the device's impl_scalar_type (for
+    // example, std::complex versus Kokkos::complex).  Match localApply's
+    // explicit conversion before dispatching to KokkosSparse.
+    const impl_scalar_type implAlpha(alpha);
+    const impl_scalar_type implBeta(beta);
+    const auto applyToOutput = [&](const auto& y2d) {
+      if (y2d.extent(1) != 1 ||
+          y2d.extent(0) != static_cast<std::size_t>(
+              crs32_ ? crs32_->matrix.numRows() : crs64_->matrix.numRows())) {
+        throw std::runtime_error("VMM SpMV: unexpected output vector local shape");
+      }
+      auto y1d = Kokkos::subview(y2d, Kokkos::ALL(), 0);
+      if (crs32_) {
+        KokkosSparse::spmv("N", implAlpha, crs32_->matrix, xGlobal, implBeta, y1d);
+      } else {
+        KokkosSparse::spmv("N", implAlpha, crs64_->matrix, xGlobal, implBeta, y1d);
+      }
+    };
+    // When beta=0, Sparse BLAS must not read the old Y values.  For
+    // beta!=0 preserve any newer host Y values with ReadWrite, rather than
+    // discarding them with OverwriteAll.
+    if (beta == Teuchos::ScalarTraits<Scalar>::zero()) {
+      applyToOutput(y.getLocalViewDevice(Tpetra::Access::OverwriteAll));
     } else {
-      KokkosSparse::spmv("N", alpha, crs64_->matrix, xGlobal, beta, y1d);
+      applyToOutput(y.getLocalViewDevice(Tpetra::Access::ReadWrite));
     }
   }
 
