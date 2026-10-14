@@ -4727,10 +4727,6 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
         (!Y_in.isVmmBacked() || Y_in.getVmmGlobalPtr() != xGlobal) &&
         vmmContext_->isCompatibleLayout(*xLayout);
 
-    //const int localEligible = eligible ? 1 : 0;
-    //int allEligible = 0;
-    //Teuchos::reduceAll<int, int>(*this->getComm(), Teuchos::REDUCE_MIN,
-    //                             localEligible, Teuchos::outArg(allEligible));
     if (! eligible) return false;
 
     // The local Tpetra view aliases the physical VMM allocation.  If its
@@ -4738,18 +4734,9 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     // allocation; it is NOT a publish/copy into a second global arena.
     // Producer completion must precede MPI's publication barrier, since
     // MPI_Barrier alone does not complete asynchronous CUDA work.
-    const bool synchronizedApply = Details::Behavior::synchronizeApply();
     std::optional<Teuchos::TimeMonitor> stageTimer;
-    //if (synchronizedApply) {
-    //  stageTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: barrier"));
-    //}
-    // it's not clear this should be here..
-    //(void)X_in.getLocalViewDevice(Access::ReadOnly);
-    //Kokkos::fence("VMM SpMV: barrier fence");
-    //this->getComm()->barrier();
-    //stageTimer.reset();
-
-    if (synchronizedApply) stageTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: direct spmv"));
+    if (Details::Behavior::synchronizeApply())
+      stageTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: direct spmv"));
     vmmContext_->applyGlobalPointer(xGlobal, Y_in, alpha, beta);
 
     return true;
