@@ -72,8 +72,8 @@ TESTS=/path/to/trilinos/packages/tpetra/core/test/VMM
 "$TESTS/run_vmm_tests.sh"    --exe "$EXE" --full --outdir ./vmm-p0-results
 "$TESTS/run_vmm_p1_tests.sh" --exe "$EXE" --full --outdir ./vmm-p1-results
 "$TESTS/run_vmm_p2_tests.sh" --exe "$EXE" --full --outdir ./vmm-p2-results
-"$TESTS/run_vmm_p3_tests.sh" --exe "$EXE" --full --outdir ./vmm-p3-results --mode baseline
-"$TESTS/run_vmm_p4_tests.sh" --exe "$EXE" --full --outdir ./vmm-p4-results --mode baseline
+"$TESTS/run_vmm_p3_tests.sh" --exe "$EXE" --full --outdir ./vmm-p3-results --mode allocation_only
+"$TESTS/run_vmm_p4_tests.sh" --exe "$EXE" --full --outdir ./vmm-p4-results --mode allocation_only
 ```
 
 The runners default to the site's `~/cronus/gpu_bind.sh`; supply `--gpu-bind /path/to/wrapper` if different. Each creates an environment-specific log and a machine-readable `results.tsv`; timeouts, failed numerical assertions, incorrect path events, and unexpected job exits are failures. See each runner's `--help` for available filters.
@@ -88,7 +88,7 @@ The runners default to the site's `~/cronus/gpu_bind.sh`; supply `--gpu-bind /pa
 | `TPETRA_EXPERIMENTAL_VMM_STATISTICS=1` | Enables allocation, skip-reason and `event=apply` diagnostic records; `0` suppresses them |
 | `TPETRA_DEBUG=1` | Used only for dedicated debug tests that expect Tpetra Map-validation exceptions |
 | `TPETRA_SYNCHRONIZE_APPLY=1` | Used only in explicit P4 timer diagnostics; ordinary correctness configurations use `0` |
-| `VMM_TEST_MAP_MODE=baseline\|generalized` | **Test-only** expectations for P3 and related checks; not a production VMM switch |
+| `VMM_TEST_MAP_MODE=baseline\|allocation_only\|generalized` | **Test-only** expectations for historical M4.1 / M5.1 / final M5; not a production VMM switch |
 
 **Environment namespace:** `Tpetra::Details::Behavior` rejects unrecognized environment variables prefixed `TPETRA_` or `Tpetra_`. Test-only controls must avoid those prefixes. In particular, use `VMM_TEST_MAP_MODE`, **not** the obsolete `TPETRA_VMM_TEST_MAP_MODE`. The CMake cache setting `Tpetra_VMM_P3_MAP_MODE` is distinct from a process environment variable.
 
@@ -123,8 +123,8 @@ This is a focused **NP=2, two-GPU prototype baseline**. It establishes correctne
 ## Using the suite during the Map/eligibility refactor
 
 1. **Keep P1, P2, and P4 green.** These protect the numerical kernel, MultiVector ownership, fallback routes, and debug/boundary semantics as implementation details change. P0 continues to protect the harness and launcher.
-2. **Use P3 baseline as the historical contract.** Today noncontiguous or overlapping Maps generally do not get native VMM allocation; equivalent Map objects can still fall back because of pointer-identity conditions.
-3. **Switch P3 to `generalized` when implementing the new policy.** This is an acceptance specification, not an enable flag. It expects direct VMM for eligible noncontiguous, one-to-one Maps and semantically equivalent Map objects; VMM allocation can be independent of global-ID contiguity. Matrix addressing must still reject an ambiguous non-one-to-one domain Map. The old baseline's *path* expectations are expected to change, while mathematical answers must not.
+2. **Use P3 `allocation_only` for M5.1.** Noncontiguous and overlapping Maps now allocate VMM storage when native VMM is enabled, but unchanged matrix indexing and Map-pointer dispatch keep G01/G02/G03/G05 on classical SpMV. The previous `baseline` remains a historical M4.1 oracle and intentionally fails M5.1 native-allocation checks.
+3. **Switch P3 to `generalized` only after M5.2–M5.4.** This final acceptance specification is not an enable flag. It expects direct VMM for eligible noncontiguous, one-to-one Maps and equivalent-but-distinct Map objects; matrix addressing still rejects ambiguous non-one-to-one domain Maps. Mathematical answers must not change.
 4. **Investigate failures in layers:** GPU binding → object allocation (`storage=vmm` or skip reason) → matrix VMM context → rank-local `event=apply` → analytic numerical result. Do not interpret an allocator success as proof of kernel dispatch.
 5. **Preserve asynchronous semantics.** New compatibility checks should follow the agreed Tpetra debug contract where appropriate; tests should not force collectives or expensive Map comparisons into normal `CrsMatrix::apply()`.
 

@@ -83,14 +83,15 @@ TPETRA_VMM_REGISTER_P2_GROUP(MultiVector VMM_MultiVector)
 TPETRA_VMM_REGISTER_P2_GROUP(Fallback VMM_Fallback)
 
 # P3 Map-generalization *test* mode.  This is not a production VMM flag.
-# Default baseline asserts M4.1 behavior; generalized defines acceptance
-# criteria for the later Map refactor.  Reconfigure CMake to switch mode.
-SET(Tpetra_VMM_P3_MAP_MODE "baseline" CACHE STRING
-    "VMM P3 Map test mode: baseline or generalized")
-SET_PROPERTY(CACHE Tpetra_VMM_P3_MAP_MODE PROPERTY STRINGS baseline generalized)
+# M5.1 relaxes MV storage eligibility but leaves matrix indexing and apply
+# unchanged.  Reconfigure a cached build with -DTpetra_VMM_P3_MAP_MODE=allocation_only.
+SET(Tpetra_VMM_P3_MAP_MODE "allocation_only" CACHE STRING
+    "VMM P3 Map test mode: baseline, allocation_only, or generalized")
+SET_PROPERTY(CACHE Tpetra_VMM_P3_MAP_MODE PROPERTY STRINGS baseline allocation_only generalized)
 IF(NOT Tpetra_VMM_P3_MAP_MODE STREQUAL "baseline" AND
+   NOT Tpetra_VMM_P3_MAP_MODE STREQUAL "allocation_only" AND
    NOT Tpetra_VMM_P3_MAP_MODE STREQUAL "generalized")
-  MESSAGE(FATAL_ERROR "Tpetra_VMM_P3_MAP_MODE must be baseline or generalized")
+  MESSAGE(FATAL_ERROR "Tpetra_VMM_P3_MAP_MODE must be baseline, allocation_only, or generalized")
 ENDIF()
 
 MACRO(TPETRA_VMM_REGISTER_P3_CASE caseName vmmEnabled nativeMv statsEnabled)

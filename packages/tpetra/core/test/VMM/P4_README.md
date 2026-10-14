@@ -64,10 +64,11 @@ that only after confirming the machine has Fabric VMM handle support and IPC
 permissions; the arena currently aborts the MPI job if CUDA driver mapping
 calls fail. The capability probe itself is always safe to run.
 
-`VMM_TEST_MAP_MODE=baseline|generalized` remains the one test-only phase
-switch from P3, and is propagated into the P4 debug-equivalence test. The
-`generalized` phase is a **future** acceptance target and may fail before the
-Map refactor; it does not enable new features by itself.
+`VMM_TEST_MAP_MODE=baseline|allocation_only|generalized` is the test-only
+expectation switch from P3, propagated into the P4 debug-equivalence test.
+`allocation_only` is the M5.1 default; P4's expected debug SpMV path is the
+same as the historical baseline until M5.4 removes Map-pointer checks.
+`generalized` remains a future acceptance target, not a feature-enabling flag.
 
 ## Full standalone sweep
 
@@ -75,7 +76,7 @@ Map refactor; it does not enable new features by itself.
 ~/cronus/trilinos/packages/tpetra/core/test/VMM/run_vmm_p4_tests.sh \
   --exe ./packages/tpetra/core/test/VMM/TpetraCore_VmmRegression.exe \
   --gpu-bind "$HOME/cronus/gpu_bind.sh" \
-  --outdir ./vmm-p4-results --full --mode baseline
+  --outdir ./vmm-p4-results --full --mode allocation_only
 ```
 
 The script launches eight independent `mpirun --bind-to none -np 2` jobs,

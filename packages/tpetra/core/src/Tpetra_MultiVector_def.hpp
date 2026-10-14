@@ -473,54 +473,42 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   } else if constexpr (!std::is_trivially_copyable<impl_scalar_type>::value) {
     logVmmSkip("scalar_not_trivially_copyable");
   } else {
+    // The arena stores rank-local entries in local-index order.  Their GIDs
+    // need not be contiguous or uniquely owned by a single rank; Map
+    // ownership constraints belong to algorithms such as direct VMM SpMV.
     const auto comm = map->getComm();
-    // Rank 0 must be able to report a failure on any rank.  A single MIN
-    // reduction replaces the previous allEligible reduction, preserving
-    // the collective construction contract and rejecting the same Maps.
-    // isOneToOne() is collective; call it on all ranks unconditionally.
-    const bool contiguous = map->isContiguous();
-    const bool oneToOne = map->isOneToOne();
-    const int localMapReason = !contiguous ? 0 : (!oneToOne ? 1 : 2);
-    int globalMapReason = 2;
+    const auto ipcName = ::Tpetra::Details::Behavior::experimentalVmmIpc();
+    const int localMode = ipcName == "posix" ? 0 : (ipcName == "fabric" ? 1 : -1);
+    int minMode = -1, maxMode = -1;
     Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
-                                 localMapReason, Teuchos::outArg(globalMapReason));
-    if (globalMapReason != 2) {
-      logVmmSkip(globalMapReason == 0 ? "map_not_contiguous"
-                                      : "map_not_one_to_one");
+                                 localMode, Teuchos::outArg(minMode));
+    Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX,
+                                 localMode, Teuchos::outArg(maxMode));
+    if (minMode < 0) {
+      logVmmSkip("ipc_mode_invalid");
+    } else if (minMode != maxMode) {
+      logVmmSkip("ipc_mode_mismatch");
     } else {
-      const auto ipcName = ::Tpetra::Details::Behavior::experimentalVmmIpc();
-      const int localMode = ipcName == "posix" ? 0 : (ipcName == "fabric" ? 1 : -1);
-      int minMode = -1, maxMode = -1;
-      Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
-                                   localMode, Teuchos::outArg(minMode));
-      Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX,
-                                   localMode, Teuchos::outArg(maxMode));
-      if (minMode < 0) {
-        logVmmSkip("ipc_mode_invalid");
-      } else if (minMode != maxMode) {
-        logVmmSkip("ipc_mode_mismatch");
-      } else {
-        const auto mode = minMode == 0 ? VmmExperiment::IpcMode::Posix
-                                       : VmmExperiment::IpcMode::Fabric;
-        VmmExperiment::VmmComm vmmComm(comm);
-        auto layout = VmmExperiment::VmmLayout<impl_scalar_type>::compute(
-            lclNumRows, mode, vmmComm);
-        auto arena = std::make_shared<VmmExperiment::DistributedVmmArena<impl_scalar_type>>(
-            std::move(layout));
-        using dev_view_type = typename dual_view_type::t_dev;
-        // Wrap only local physical storage in the ordinary Tpetra view.
-        // Its global VMM mapping is exposed separately by getVmmGlobalPtr().
-        dev_view_type dView(arena->localPtr(), lclNumRows, size_t(1));
-        view_ = wrapped_dual_view_type(dView, std::static_pointer_cast<void>(arena));
-        if (zeroOut) {
-          Kokkos::deep_copy(dView, impl_scalar_type{});
-        } else if (::Tpetra::Details::Behavior::debug()) {
-          KokkosBlas::fill(dView, KokkosKernels::ArithTraits<impl_scalar_type>::nan());
-        }
-        vmmArena_ = std::move(arena);
-        logAllocation();
-        return;
+      const auto mode = minMode == 0 ? VmmExperiment::IpcMode::Posix
+                                     : VmmExperiment::IpcMode::Fabric;
+      VmmExperiment::VmmComm vmmComm(comm);
+      auto layout = VmmExperiment::VmmLayout<impl_scalar_type>::compute(
+          lclNumRows, mode, vmmComm);
+      auto arena = std::make_shared<VmmExperiment::DistributedVmmArena<impl_scalar_type>>(
+          std::move(layout));
+      using dev_view_type = typename dual_view_type::t_dev;
+      // Wrap only local physical storage in the ordinary Tpetra view.
+      // Its global VMM mapping is exposed separately by getVmmGlobalPtr().
+      dev_view_type dView(arena->localPtr(), lclNumRows, size_t(1));
+      view_ = wrapped_dual_view_type(dView, std::static_pointer_cast<void>(arena));
+      if (zeroOut) {
+        Kokkos::deep_copy(dView, impl_scalar_type{});
+      } else if (::Tpetra::Details::Behavior::debug()) {
+        KokkosBlas::fill(dView, KokkosKernels::ArithTraits<impl_scalar_type>::nan());
       }
+      vmmArena_ = std::move(arena);
+      logAllocation();
+      return;
     }
   }
 #else
@@ -1824,6 +1812,18 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   using IST = impl_scalar_type;
   using DV  = Kokkos::DualView<IST*, Kokkos::LayoutLeft, buffer_device_type>;
 
+  // Native VMM storage is valid for device kernels but may not be
+  // registerable by the MPI transport (for example, UCX gdr_copy).
+  // In particular, do not alias an MPI receive buffer into VMM storage:
+  // receive into the ordinary imports_ buffer and unpack into the MV.
+  // Check arena ownership, rather than isVmmBacked(), because subviews can
+  // reference VMM memory even if they are not canonical VMM vectors.
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  const bool mayAliasImportsIntoDataView = !vmmArena_;
+#else
+  const bool mayAliasImportsIntoDataView = true;
+#endif
+
   // Conditions for aliasing memory:
   // - When both sides of the dual view are in the same memory
   //   space, we do not need to worry about syncing things.
@@ -1834,7 +1834,8 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   // - CombineMode needs to be INSERT.
   // - The number of vectors needs to be 1, otherwise we need to
   //   reorder the received data.
-  if ((std::is_same_v<typename dual_view_type::t_dev::device_type, typename dual_view_type::t_host::device_type> ||
+  if (mayAliasImportsIntoDataView &&
+      (std::is_same_v<typename dual_view_type::t_dev::device_type, typename dual_view_type::t_host::device_type> ||
        (Details::Behavior::assumeMpiIsGPUAware() && !this->need_sync_device()) ||
        (!Details::Behavior::assumeMpiIsGPUAware() && !this->need_sync_host())) &&
       areRemoteLIDsContiguous &&
@@ -4219,6 +4220,18 @@ void MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   if (comm.get() == nullptr) {
     return;
   }
+
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  // A VMM device pointer may not be registerable by GPU-aware MPI. (requires 5.x)
+  // The ordinary host mirror is MPI-safe, and the WrappedDualView takes
+  // care of device/host synchronization and subsequent device access.
+  // This is strictly the classical reduction path, not direct VMM SpMV.
+  if (vmmArena_) {
+    auto X_lcl = this->getLocalViewHost(Access::ReadWrite);
+    allReduceView(X_lcl, X_lcl, *comm);
+    return;
+  }
+#endif
 
   // Avoid giving device buffers to MPI.  Even if MPI handles them
   // correctly, doing so may not perform well.

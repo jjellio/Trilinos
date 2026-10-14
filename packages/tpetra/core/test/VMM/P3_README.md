@@ -1,33 +1,36 @@
 # P3 — Distributed Map eligibility and identity regression (NP=2)
 
 P3 extends the user-validated P0/P1/P2 test suite with **five concrete Map
-fixtures** and an explicit test-only `baseline` versus `generalized` phase
-switch. It leaves all production Tpetra VMM code untouched. The expected
-outcomes are described in `p3_expected_paths.tsv`.
+fixtures** and a test-only three-stage expectation switch: `baseline` (M4.1),
+`allocation_only` (M5.1, current default), and `generalized` (final target).
+The fixture does not change production behavior; the expected outcomes are
+specified in `p3_expected_paths.tsv`.
 
 ## Purpose
 
-Make the present milestone-4.1 restrictions visible **before** relaxing
-MultiVector allocation and CrsMatrix indexing requirements. Validate that a
-mathematically equivalent, separately constructed Map is not mistakenly treated
-as a different distribution when the later runtime raw-pointer checks are
-removed.
+Distinguish the implemented M5.1 MV allocation policy from the still
+contiguous-only matrix indexing policy, while retaining the historical M4.1
+baseline and the future M5.2–M5.4 direct-SpMV acceptance requirements.
+Also validate that equivalent, separately constructed Maps eventually use
+direct VMM dispatch without raw-pointer Map comparisons.
 
-The two modes deliberately have different assertions:
+The modes have different assertions:
 
-- `baseline` (default): tests **current milestone-4.1 behavior**. With both
-  VMM and native-MV enabled, noncontiguous and overlapping Maps select
-  standard memory; G03 uses VMM allocations but takes the classic path when
-  Map identities differ. Numerical results must be correct either way.
-- `generalized`: **future acceptance specification**, expected to FAIL on the
-  milestone-4.1 code. G01 and G02 become VMM-backed and direct SpMV; G03's
-  separately constructed but equivalent Maps also use direct VMM; G04's
-  overlapping Map is permitted as MV storage. A matrix with non-one-to-one
-  domain Map (G05) must still refuse direct VMM SpMV *collectively* and retain
-  the classic path (where supported).
+- `baseline`: the **historical milestone-4.1 behavior**. Noncontiguous and
+  overlapping Maps select standard MV storage; equivalent-but-distinct Maps
+  execute classical SpMV. This mode is *not expected to pass* on M5.1 when
+  native VMM is enabled, because the allocator policy has intentionally changed.
+- `allocation_only` (**M5.1 default**): G01/G02's noncontiguous Maps and
+  G04/G05's overlapping Maps allocate native VMM storage when enabled. The
+  matrix still requires contiguous domain Maps, so G01/G02/G05 execute
+  classical SpMV with their existing matrix skip reason. G03 remains classic
+  for distinct Map objects. The numerical oracle is unchanged.
+- `generalized`: the **future M5 acceptance specification**. G01/G02 and G03
+  execute direct VMM SpMV; G04 allocates VMM storage, while G05's non-one-to-one
+  domain remains a matrix-side rejection and classical fallback.
 
-Neither mode changes any library behavior; `VMM_TEST_MAP_MODE` is only
-consulted by the C++ test fixture and external runner.
+No test mode changes library behavior; `VMM_TEST_MAP_MODE` is only consulted
+by the C++ fixture and the external runner.
 
 ## Fixtures and checks
 
@@ -61,13 +64,14 @@ P3 reuses P1's statistics-gated apply path record:
 ```
 
 Five tests emit **six** nontranspose apply events per rank: G01, G02, three
-G03 subcases, and G05. G04 emits none. The C++ tests check the rank-local
-path when statistics are enabled, so CTest alone will fail on wrong dispatch.
-The standalone validator further checks exact per-rank trace counts and
-rank-zero matrix context diagnostics for G01/G02/G05; with statistics off it
-requires no apply records. The current matrix's diagnostic reason is
-`map_not_contiguous`. The later desired G05 reason is
-`domain_map_not_one_to_one` (requires production refactor).
+G03 subcases, and G05. G04 emits none. The C++ tests check native storage
+independently of matrix SpMV path. Both the in-test trace assertions and the
+standalone validator check rank-local dispatch. In `allocation_only`, the
+matrix still emits `reason=map_not_contiguous` for G01/G02/G05, but the
+MultiVector allocator must no longer reject those Maps with that reason or
+`map_not_one_to_one`. The later desired matrix-side G05 reason is
+`domain_map_not_one_to_one` (M5.2). With statistics off no apply records are
+expected.
 
 ## Build and CTest
 
@@ -82,12 +86,15 @@ ctest --test-dir /path/to/build -j1 -R VMM_P3_NP2 -V
 ```
 
 This selects **six independent, two-rank CTest jobs**, each running all five
-Map tests in a fresh process. CTest defaults to `baseline`. After the later
-refactor, switch only the test oracle by reconfiguring with:
+Map tests in a fresh process. The new CMake default is `allocation_only`.
+For an **existing build directory**, explicitly update the cached test mode:
 
 ```text
--DTpetra_VMM_P3_MAP_MODE=generalized
+-DTpetra_VMM_P3_MAP_MODE=allocation_only
 ```
+
+After M5.2–M5.4, change the test oracle to `generalized`; it must not be used
+as an M5.1 pass criterion.
 
 The suite intentionally requires both distinct GPUs and all-rank execution
 with the same Map construction order. All test producer/read fences and MPI
@@ -99,7 +106,7 @@ barriers are **caller-side only**; `apply()` remains asynchronous.
 ~/cronus/trilinos/packages/tpetra/core/test/VMM/run_vmm_p3_tests.sh \
   --exe ./packages/tpetra/core/test/VMM/TpetraCore_VmmRegression.exe \
   --gpu-bind "$HOME/cronus/gpu_bind.sh" \
-  --outdir ./vmm-p3-results --full --mode baseline
+  --outdir ./vmm-p3-results --full --mode allocation_only
 ```
 
 Use `--quick` for classic, full VMM quiet and full VMM+statistics. Full mode
@@ -107,9 +114,9 @@ runs all six P0–P2 configuration combinations. Each run uses POSIX IPC,
 `TPETRA_SYNCHRONIZE_APPLY=0`, and `TPETRA_DEBUG=0`; no MPI launcher binding
 flags need to be changed beyond those already configured.
 
-Use `--mode generalized` only **after** the source refactor. It should fail
-against the milestone-4.1 implementation; that is intentional, not an
-expected-to-pass P3 baseline. Every scenario writes a log and one TSV status.
+Use `--mode generalized` only after matrix indexing and dispatch are updated.
+The historical `baseline` profile intentionally does not represent M5.1's
+native-MV storage behavior. Every scenario writes a log and one TSV status.
 
 ## Scope / caveats
 

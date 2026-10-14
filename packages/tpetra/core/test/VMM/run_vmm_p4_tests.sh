@@ -12,7 +12,8 @@ Usage: run_vmm_p4_tests.sh --exe /path/to/TpetraCore_VmmRegression.exe [options]
   --np N            MPI ranks; P4 requires exactly 2
   --outdir DIR      Logs and results.tsv (default ./vmm-p4-results)
   --timeout SEC     Wall-time limit per MPI job (default 180)
-  --mode MODE       baseline (default) or generalized (future Map acceptance)
+  --mode MODE       allocation_only (default M5.1), baseline (historical),
+                    or generalized (future Map acceptance)
   --quick           Boundary classic, boundary VMM stats, debug classic,
                     VMM timer, and Fabric capability probe (default)
   --full            3 boundary, 2 debug, 2 timer, 1 Fabric probe
@@ -31,7 +32,7 @@ np=2
 outdir=./vmm-p4-results
 timeout_sec=180
 mode=quick
-map_mode=baseline
+map_mode=allocation_only
 fabric_requested=0
 while (($#)); do
   case "$1" in
@@ -60,7 +61,7 @@ done
 [[ -x "$gpu_bind" ]] || { echo "GPU binder missing or not executable: $gpu_bind" >&2; exit 2; }
 [[ "$np" =~ ^[0-9]+$ ]] && ((np == 2)) || { echo 'P4 requires --np 2' >&2; exit 2; }
 [[ "$timeout_sec" =~ ^[0-9]+$ ]] && ((timeout_sec > 0)) || { echo 'Invalid --timeout' >&2; exit 2; }
-[[ "$map_mode" == baseline || "$map_mode" == generalized ]] || { echo 'Invalid --mode' >&2; exit 2; }
+[[ "$map_mode" == baseline || "$map_mode" == allocation_only || "$map_mode" == generalized ]] || { echo 'Invalid --mode' >&2; exit 2; }
 # A pre-hotfix P3 variable is not recognized by Tpetra::Behavior.
 if [[ ${TPETRA_VMM_TEST_MAP_MODE+x} ]]; then
   echo "Obsolete TPETRA_VMM_TEST_MAP_MODE is set; run: unset TPETRA_VMM_TEST_MAP_MODE" >&2

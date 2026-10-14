@@ -21,14 +21,27 @@
 namespace TpetraVmmP3 {
 using namespace TpetraVmmP2;
 
-// The same sources serve as the pre-refactor baseline and post-refactor
-// acceptance tests.  This variable affects *tests only*, not Tpetra::Behavior.
-inline bool expectGeneralizedMaps() {
+// The same fixtures support the M4.1 historical baseline, M5.1 native
+// allocation (without matrix-index generalization), and final acceptance.
+// This variable affects *tests only*, not Tpetra::Behavior.
+enum class MapTestMode { Baseline, AllocationOnly, Generalized };
+
+inline MapTestMode mapTestMode() {
   const char* raw = std::getenv("VMM_TEST_MAP_MODE");
-  if (raw == nullptr || std::string(raw) == "baseline") return false;
-  if (std::string(raw) == "generalized") return true;
+  if (raw == nullptr || std::string(raw) == "allocation_only")
+    return MapTestMode::AllocationOnly;
+  if (std::string(raw) == "baseline") return MapTestMode::Baseline;
+  if (std::string(raw) == "generalized") return MapTestMode::Generalized;
   throw std::invalid_argument(
-      "VMM_TEST_MAP_MODE must be baseline or generalized");
+      "VMM_TEST_MAP_MODE must be baseline, allocation_only, or generalized");
+}
+
+inline bool expectGeneralizedMaps() {
+  return mapTestMode() == MapTestMode::Generalized;
+}
+
+inline bool expectGeneralizedMvAllocation() {
+  return mapTestMode() != MapTestMode::Baseline;
 }
 
 inline auto explicitMap(std::initializer_list<go_type> rank0,
@@ -125,8 +138,8 @@ inline auto makeDiagonalWithDomain(const Teuchos::RCP<const map_type>& rowMap,
   return A;
 }
 
-// Matrix fillComplete must preserve the historical rejection diagnostics
-// in baseline mode; generalized mode specifies the desired future result.
+// Matrix fillComplete still uses contiguous-GID addressing in M5.1; only
+// generalized mode expects different matrix eligibility diagnostics.
 // Capture only around *construction*, not around an MPI or device epoch.
 template <class MatrixFactory>
 auto makeAndCheckMatrix(const MatrixFactory& factory,

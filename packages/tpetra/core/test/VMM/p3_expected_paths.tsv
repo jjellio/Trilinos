@@ -1,11 +1,11 @@
-# phase=baseline -> current milestone-4.1 expectations; phase=generalized -> post-refactor acceptance
-# These are conditional on TPETRA_EXPERIMENTAL_VMM=1 and TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=1.
-# The "Y" column for G04 is N/A because no matrix apply is performed.
-case	baseline_X_storage	baseline_Y_storage	baseline_apply	generalized_X_storage	generalized_Y_storage	generalized_apply
-G01_Interleaved	standard	standard	classic	vmm	vmm	vmm
-G02_PermutedLocalGids	standard	standard	classic	vmm	vmm	vmm
-G03_XDistinct	vmm	vmm	classic	vmm	vmm	vmm
-G03_YDistinct	vmm	vmm	classic	vmm	vmm	vmm
-G03_BothDistinct	vmm	vmm	classic	vmm	vmm	vmm
-G04_OverlappingMV	standard	N/A	N/A	vmm	N/A	N/A
-G05_NonOneToOneDomain	standard	vmm	classic	vmm	vmm	classic
+# baseline = historical M4.1; allocation_only = M5.1; generalized = final M5 target
+# Values apply when TPETRA_EXPERIMENTAL_VMM=1 and TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=1.
+# All modes remain test-only expectations and do not change Tpetra execution.
+case	baseline_X_storage	baseline_Y_storage	baseline_apply	allocation_only_X_storage	allocation_only_Y_storage	allocation_only_apply	generalized_X_storage	generalized_Y_storage	generalized_apply
+G01_Interleaved	standard	standard	classic	vmm	vmm	classic	vmm	vmm	vmm
+G02_PermutedLocalGids	standard	standard	classic	vmm	vmm	classic	vmm	vmm	vmm
+G03_XDistinct	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	vmm
+G03_YDistinct	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	vmm
+G03_BothDistinct	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	vmm
+G04_OverlappingMV	standard	N/A	N/A	vmm	N/A	N/A	vmm	N/A	N/A
+G05_NonOneToOneDomain	standard	vmm	classic	vmm	vmm	classic	vmm	vmm	classic

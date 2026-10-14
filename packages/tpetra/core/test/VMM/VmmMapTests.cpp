@@ -4,9 +4,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // ****************************************************************************
 // @HEADER
-// P3 G01-G05: contract tests for future VMM Map generalization.
-// The default "baseline" phase asserts milestone 4.1 fallback behavior.
-// "generalized" is a future acceptance profile, NOT an implementation flag.
+// P3 G01-G05: VMM Map contracts across development milestones.
+// "allocation_only" tests M5.1 storage behavior with unchanged matrix
+// addressing and dispatch; "generalized" remains the future target.
 
 #include "VmmP3Helpers.hpp"
 
@@ -25,8 +25,10 @@ TEUCHOS_UNIT_TEST(VMM_Map, G01_Interleaved) {
       "P3_G01_Interleaved", generalized ? "" : "map_not_contiguous",
       out, success);
   vector_type X(map, 1), Y(map, 1);
-  checkStorage(X, nativeExpected() && generalized, "G01 X", out, success);
-  checkStorage(Y, nativeExpected() && generalized, "G01 Y", out, success);
+  checkStorage(X, nativeExpected() && expectGeneralizedMvAllocation(),
+               "G01 X", out, success);
+  checkStorage(Y, nativeExpected() && expectGeneralizedMvAllocation(),
+               "G01 Y", out, success);
   prepareX(X);
   executeAndCheck(*A, X, Y, standardOrVmmPath(generalized),
                   "P3_G01_Interleaved", false, out, success);
@@ -47,8 +49,10 @@ TEUCHOS_UNIT_TEST(VMM_Map, G02_PermutedLocalGids) {
       "P3_G02_Permuted", generalized ? "" : "map_not_contiguous",
       out, success);
   vector_type X(map, 1), Y(map, 1);
-  checkStorage(X, nativeExpected() && generalized, "G02 X", out, success);
-  checkStorage(Y, nativeExpected() && generalized, "G02 Y", out, success);
+  checkStorage(X, nativeExpected() && expectGeneralizedMvAllocation(),
+               "G02 X", out, success);
+  checkStorage(Y, nativeExpected() && expectGeneralizedMvAllocation(),
+               "G02 Y", out, success);
   prepareX(X);
   executeAndCheck(*A, X, Y, standardOrVmmPath(generalized),
                   "P3_G02_Permuted", false, out, success);
@@ -103,7 +107,7 @@ TEUCHOS_UNIT_TEST(VMM_Map, G04_OverlappingMV) {
   // Only allocation is being tested. An overlapping MV is a valid storage
   // object, but it does not imply unique owner addresses for a VMM SpMV.
   vector_type X(map, 1);
-  checkStorage(X, nativeExpected() && expectGeneralizedMaps(),
+  checkStorage(X, nativeExpected() && expectGeneralizedMvAllocation(),
                "G04 overlapping MV", out, success);
   prepareX(X);
   producerReady();
@@ -134,7 +138,8 @@ TEUCHOS_UNIT_TEST(VMM_Map, G05_NonOneToOneDomain) {
       generalized ? "domain_map_not_one_to_one" : "map_not_contiguous",
       out, success);
   vector_type X(domain, 1), Y(row, 1);
-  checkStorage(X, nativeExpected() && generalized, "G05 domain X", out, success);
+  checkStorage(X, nativeExpected() && expectGeneralizedMvAllocation(),
+               "G05 domain X", out, success);
   checkStorage(Y, nativeExpected(), "G05 range Y", out, success);
   prepareX(X);
   executeAndCheck(*A, X, Y, "classic", "P3_G05_NonOneToOneDomain",

@@ -127,8 +127,8 @@ def main():
     parser.add_argument("--vmm", choices=(0, 1), type=int, required=True)
     parser.add_argument("--native", choices=(0, 1), type=int, required=True)
     parser.add_argument("--stats", choices=(0, 1), type=int, required=True)
-    parser.add_argument("--mode", choices=("baseline", "generalized"),
-                        default="baseline")
+    parser.add_argument("--mode", choices=("baseline", "allocation_only", "generalized"),
+                        default="allocation_only")
     parser.add_argument("--np", type=int, default=2)
     args = parser.parse_args()
     if args.np != 2:

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Validate P3 numerical-suite completion and exact per-rank VMM dispatch.
 
-The baseline mode verifies the current fallback policy.  The generalized mode
-is a *future* acceptance oracle; passing it requires the Map refactor.
+The allocation_only mode verifies M5.1: generalized MV storage with unchanged
+matrix fallback and apply dispatch.  The generalized mode remains a future
+acceptance oracle; baseline records the historical M4.1 behavior.
 """
 
 import argparse
@@ -71,6 +72,11 @@ def check_output(content: str, vmm: bool, native: bool, stats: bool,
                                   f"observed={observed}, expected={expected}")
 
     if vmm:
+        if native and mode != "baseline" and re.search(
+            r"\[TPETRA_MV\]\s+event=vmmSkip[^\n]*"
+            r"reason=(?:map_not_contiguous|map_not_one_to_one)\b", content
+        ):
+            errors.append("obsolete MultiVector Map-distribution rejection observed")
         found_skip = {label: reason for label, reason in SKIP.findall(content)
                       if label.startswith("P3_G")}
         expected_skips = {
@@ -95,8 +101,8 @@ def main():
     parser.add_argument("--vmm", type=int, choices=(0, 1), required=True)
     parser.add_argument("--native", type=int, choices=(0, 1), required=True)
     parser.add_argument("--stats", type=int, choices=(0, 1), required=True)
-    parser.add_argument("--mode", choices=("baseline", "generalized"),
-                        default="baseline")
+    parser.add_argument("--mode", choices=("baseline", "allocation_only", "generalized"),
+                        default="allocation_only")
     parser.add_argument("--np", type=int, default=2)
     args = parser.parse_args()
     if args.np != 2:
