@@ -430,24 +430,64 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
        << '\n';
     std::cout << os.str() << std::flush;
   };
+  // Explain why this instance did not take the native VMM allocation path.
+  // No MPI collectives are introduced for disabled/unsupported cases.
+  const auto logVmmSkip = [&](const char* reason) {
+    if (!::Tpetra::Details::Behavior::experimentalVmmStatistics() ||
+        map.is_null() || map->getComm().is_null() ||
+        map->getComm()->getRank() != 0) {
+      return;
+    }
+    std::ostringstream os;
+    os << "[TPETRA_MV] event=vmmSkip"
+       << " object=" << static_cast<const void*>(this)
+       << " label=" << std::quoted(this->getObjectLabel())
+       << " rows=" << this->getGlobalLength()
+       << " cols=" << numVecs
+       << " local_rows=" << lclNumRows
+       << " reason=" << reason << '\n';
+    std::cout << os.str() << std::flush;
+  };
+  if (!::Tpetra::Details::Behavior::experimentalVmmNativeMv()) {
+    logVmmSkip("native_mv_disabled");
+  } else if (!::Tpetra::Details::Behavior::experimentalVmm()) {
+    logVmmSkip("vmm_disabled");
+  } else if (numVecs != 1) {
+    logVmmSkip("num_vectors_not_one");
+  } else if (map.is_null()) {
+    logVmmSkip("map_null");
+  } else if (map->getComm().is_null()) {
+    logVmmSkip("comm_null");
+  } else if (map->getComm()->getSize() < 2) {
+    logVmmSkip("single_rank");
+  } else {
 #if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
   // EXPERIMENTAL / COLLECTIVE constructor path.  All participating ranks
   // must enter these one-column constructors in the same sequence.
   // Unsupported configurations retain the standard Tpetra allocation.
-  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value &&
-                std::is_same<typename dual_view_type::t_dev::memory_space,
-                             Kokkos::CudaSpace>::value &&
-                std::is_trivially_copyable<impl_scalar_type>::value) {
-    if (::Tpetra::Details::Behavior::experimentalVmmNativeMv() &&
-        ::Tpetra::Details::Behavior::experimentalVmm() && numVecs == 1 &&
-        !map.is_null() && !map->getComm().is_null() &&
-        map->getComm()->getSize() > 1) {
-      const auto comm = map->getComm();
-      // Eligibility must be agreed on before any rank starts CUDA IPC.
-      const int localEligible = (map->isContiguous() && map->isOneToOne()) ? 1 : 0;
-      int allEligible = 0;
-      Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
-                                   localEligible, Teuchos::outArg(allEligible));
+  if constexpr (!std::is_same<execution_space, Kokkos::Cuda>::value) {
+    logVmmSkip("not_cuda_execution_space");
+  } else if constexpr (!std::is_same<typename dual_view_type::t_dev::memory_space,
+                                          Kokkos::CudaSpace>::value) {
+    logVmmSkip("not_cuda_device_memory");
+  } else if constexpr (!std::is_trivially_copyable<impl_scalar_type>::value) {
+    logVmmSkip("scalar_not_trivially_copyable");
+  } else {
+    const auto comm = map->getComm();
+    // Rank 0 must be able to report a failure on any rank.  A single MIN
+    // reduction replaces the previous allEligible reduction, preserving
+    // the collective construction contract and rejecting the same Maps.
+    // isOneToOne() is collective; call it on all ranks unconditionally.
+    const bool contiguous = map->isContiguous();
+    const bool oneToOne = map->isOneToOne();
+    const int localMapReason = !contiguous ? 0 : (!oneToOne ? 1 : 2);
+    int globalMapReason = 2;
+    Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                 localMapReason, Teuchos::outArg(globalMapReason));
+    if (globalMapReason != 2) {
+      logVmmSkip(globalMapReason == 0 ? "map_not_contiguous"
+                                      : "map_not_one_to_one");
+    } else {
       const auto ipcName = ::Tpetra::Details::Behavior::experimentalVmmIpc();
       const int localMode = ipcName == "posix" ? 0 : (ipcName == "fabric" ? 1 : -1);
       int minMode = -1, maxMode = -1;
@@ -455,7 +495,11 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
                                    localMode, Teuchos::outArg(minMode));
       Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX,
                                    localMode, Teuchos::outArg(maxMode));
-      if (allEligible != 0 && minMode >= 0 && minMode == maxMode) {
+      if (minMode < 0) {
+        logVmmSkip("ipc_mode_invalid");
+      } else if (minMode != maxMode) {
+        logVmmSkip("ipc_mode_mismatch");
+      } else {
         const auto mode = minMode == 0 ? VmmExperiment::IpcMode::Posix
                                        : VmmExperiment::IpcMode::Fabric;
         VmmExperiment::VmmComm vmmComm(comm);
@@ -479,7 +523,10 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
       }
     }
   }
+#else
+  logVmmSkip("vmm_build_unavailable");
 #endif
+  }
   view_ = allocDualView<Scalar, LocalOrdinal, GlobalOrdinal, Node>(lclNumRows, numVecs, zeroOut);
   logAllocation();
 }

@@ -9,6 +9,7 @@
 
 #include "Tpetra_Details_VmmLayout.hpp"
 #include "Tpetra_Details_VmmMatrixInfo.hpp"
+#include "Tpetra_Details_Behavior.hpp"
 #include "Tpetra_CrsMatrix_fwd.hpp"
 #include "Tpetra_DistObject_fwd.hpp"
 #include "Tpetra_MultiVector.hpp"
@@ -91,44 +92,43 @@ class VmmSpmvContext {
     }
     buildAddressedMatrix(A);
 
-    const auto& analysis = TpetraMatrixInfo::analyzeAccessPattern(A);
+    // Access-pattern analysis is collective and only needed for statistics.
+    // Do not run it (or print the matrix statistics) unless explicitly asked.
+    if (Tpetra::Details::Behavior::experimentalVmmStatistics()) {
+      const auto& analysis = TpetraMatrixInfo::analyzeAccessPattern(A);
+      if (analysis.myRank == 0) {
+        std::ostringstream os;
 
-    if (analysis.myRank == 0) {
-      std::ostringstream os;
-   
-      using dist_object_type = Tpetra::DistObject<
-          char,
-          typename matrix_type::local_ordinal_type,
-          typename matrix_type::global_ordinal_type,
-          typename matrix_type::node_type>;
- 
-      // Use the same address representation as the
-      // DistObject::setObjectLabel() hook.
-      const auto* identity =
-          static_cast<const dist_object_type*>(&A);
-    
-      // The analysis already contains the globally reduced
-      // reference counts, so this also gives global NNZ.
-      TpetraMatrixInfo::count_type globalNnz = 0;
-      for (const auto count : analysis.references) {
-        globalNnz += count;
+        using dist_object_type = Tpetra::DistObject<
+            char,
+            typename matrix_type::local_ordinal_type,
+            typename matrix_type::global_ordinal_type,
+            typename matrix_type::node_type>;
+
+        // Use the same address representation as the
+        // DistObject::setObjectLabel() hook.
+        const auto* identity =
+            static_cast<const dist_object_type*>(&A);
+
+        // The analysis already contains the globally reduced
+        // reference counts, so this also gives global NNZ.
+        TpetraMatrixInfo::count_type globalNnz = 0;
+        for (const auto count : analysis.references) {
+          globalNnz += count;
+        }
+
+        os << "\n[TPETRA_MATRIX] event=fillComplete"
+           << " object=" << static_cast<const void*>(identity)
+           << " label=" << std::quoted(A.getObjectLabel())
+           << " rows=" << A.getGlobalNumRows()
+           << " cols=" << A.getGlobalNumCols()
+           << " nnz=" << globalNnz
+           << '\n';
+
+        print(os, analysis);
+        std::cout << os.str();
       }
-    
-      os << "\n[TPETRA_MATRIX] event=fillComplete"
-         << " object=" << static_cast<const void*>(identity)
-         << " label=" << std::quoted(A.getObjectLabel())
-         << " rows=" << A.getGlobalNumRows()
-         << " cols=" << A.getGlobalNumCols()
-         << " nnz=" << globalNnz
-         << '\n';
-    
-      print(os, analysis);
-      std::cout << os.str();
     }
-
-
-    
-
   }
 
   // The context owns no CUDA allocation or virtual mappings.  The caller
@@ -281,7 +281,8 @@ class VmmSpmvContext {
           "VMM CRS dimensions exceed signed 64-bit indexing");
     }
 
-    if (rank_ == 0) {
+    if (rank_ == 0 &&
+        Tpetra::Details::Behavior::experimentalVmmStatistics()) {
       std::cout << "VMM CRS translation: borrowing Tpetra row_map + values; "
                 << (crs32_ ? "signed 32-bit" : "signed 64-bit")
                 << " addressed column ordinals, no VMM X allocation"

@@ -64,6 +64,8 @@
 #include <memory>
 #include <type_traits>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <typeinfo>
 #include <utility>
@@ -4233,45 +4235,71 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     initializeVmmContext(const Teuchos::RCP<Teuchos::ParameterList>& /*params*/) {
-  // No VMM metadata collective unless enabled via Tpetra Behavior.
+  const auto logVmmSkip = [&](const char* reason) {
+    if (!Details::Behavior::experimentalVmmStatistics()) return;
+    const auto comm = this->getComm();
+    if (comm.is_null() || comm->getRank() != 0) return;
+    // Match the DistObject pointer used by the fillComplete/label hooks.
+    const auto* identity = static_cast<const dist_object_type*>(this);
+    std::ostringstream os;
+    os << "[TPETRA_MATRIX] event=vmmSkip"
+       << " object=" << static_cast<const void*>(identity)
+       << " label=" << std::quoted(this->getObjectLabel())
+       << " rows=" << this->getGlobalNumRows()
+       << " cols=" << this->getGlobalNumCols()
+       << " reason=" << reason << '\n';
+    std::cout << os.str() << std::flush;
+  };
+  // Never enter the VMM layout collectives when experimental VMM is off.
   if (!Details::Behavior::experimentalVmm()) {
+    logVmmSkip("vmm_disabled");
     return;
   }
 
   Teuchos::TimeMonitor timer(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: initializeVmmContext"));
 
 #if defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
-  // dont use VMM when it's not a distibuted structure
-  if (this->getComm()->getSize() < 2) return ;
+  if (this->getComm().is_null()) {
+    logVmmSkip("comm_null");
+    return;
+  }
+  if (this->getComm()->getSize() < 2) {
+    logVmmSkip("single_rank");
+    return;
+  }
 
- 
   // A Tpetra build may explicitly instantiate both host and CUDA matrices.
   // A compile-time branch prevents instantiation of CUDA-only context code
   // for all non-CUDA CrsMatrix specializations.
-  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value &&
-                std::is_integral<LocalOrdinal>::value &&
-                std::is_signed<LocalOrdinal>::value) {
+  if constexpr (!std::is_same<execution_space, Kokkos::Cuda>::value) {
+    logVmmSkip("not_cuda_execution_space");
+  } else if constexpr (!std::is_integral<LocalOrdinal>::value ||
+                       !std::is_signed<LocalOrdinal>::value) {
+    logVmmSkip("local_ordinal_not_signed_integral");
+  } else {
     const auto domainMap = this->getDomainMap();
     const auto colMap = this->getColMap();
     const auto rowMap = this->getRowMap();
     const auto rangeMap = this->getRangeMap();
     const auto comm = this->getComm();
-    // Collectively reject Maps that the prototype address translation
-    // cannot represent before gathering the VMM layout metadata.
-    int localEligible = 0;
-    if (!domainMap.is_null() && !colMap.is_null() &&
-        !rowMap.is_null() && !rangeMap.is_null() &&
-        domainMap->isContiguous()) {
-      localEligible = 1;
-    }
-    int allEligible = 0;
+    // Preserve the original eligibility criteria.  Priority-coded reasons
+    // make a rejection on another rank visible in rank 0's statistics log;
+    // the single MIN reduction replaces the original eligibility reduction.
+    const int localMapReason = domainMap.is_null() ? 0
+                             : colMap.is_null()    ? 1
+                             : rowMap.is_null()    ? 2
+                             : rangeMap.is_null()  ? 3
+                             : !domainMap->isContiguous() ? 4 : 5;
+    int globalMapReason = 5;
     Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
-                                 localEligible, Teuchos::outArg(allEligible));
-
-    // we can't do VMM
-    // Experimental VMM requires nonnull row/domain/range/column maps
-    // and a contiguous domain Map on every participating rank.
-    if (allEligible == 0) return;
+                                 localMapReason, Teuchos::outArg(globalMapReason));
+    if (globalMapReason != 5) {
+      static constexpr const char* reasons[] = {
+          "domain_map_null", "column_map_null", "row_map_null",
+          "range_map_null", "map_not_contiguous"};
+      logVmmSkip(reasons[globalMapReason]);
+      return;
+    }
 
     // Validate the IPC choice collectively too.  A mixture of POSIX and
     // Fabric constructors would otherwise deadlock during handle exchange.
@@ -4309,7 +4337,10 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     // as column indices.  Unsupported extents use ordinary Tpetra apply.
     // Every rank computed the same total padded extent.
     if (layout.totalElements() > static_cast<std::uint64_t>(
-            std::numeric_limits<std::int64_t>::max())) return;
+            std::numeric_limits<std::int64_t>::max())) {
+      logVmmSkip("vmm_index_overflow");
+      return;
+    }
 
     // The context owns translated CRS indices and borrows Tpetra values /
     // row offsets; no CUDA physical or virtual vector storage is allocated.
@@ -4327,6 +4358,8 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     */
     return;
   }
+#else
+  logVmmSkip("vmm_build_unavailable");
 #endif  // HAVE_TPETRA_INST_CUDA && KOKKOS_ENABLE_CUDA && HAVE_MPI
 }
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
