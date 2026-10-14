@@ -4746,11 +4746,32 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   const Scalar ZERO = Teuchos::ScalarTraits<Scalar>::zero();
   const Scalar ONE  = Teuchos::ScalarTraits<Scalar>::one();
 
+#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+  // P1 regression observability: report the *selected* apply path, not
+  // merely the existence of a VMM allocation or an addressed CRS matrix.
+  // This is rank-local diagnostic I/O only.  It neither communicates nor
+  // waits for outstanding kernels, and is silent unless statistics is on.
+  const auto logVmmApplyPath = [&](const char* path) {
+    if (!Details::Behavior::experimentalVmmStatistics()) return;
+    const auto comm = this->getComm();
+    if (comm.is_null()) return;
+    std::ostringstream os;
+    os << "[TPETRA_MATRIX] event=apply path=" << path
+       << " rank=" << comm->getRank()
+       << " label=" << std::quoted(this->getObjectLabel())
+       << '\n';
+    std::cout << os.str() << std::flush;
+  };
+#endif
+
   // mfh 05 Jun 2014: Special case for alpha == 0.  I added this to
   // fix an Ifpack2 test (RILUKSingleProcessUnitTests), which was
   // failing only for the Kokkos refactor version of Tpetra.  It's a
   // good idea regardless to have the bypass.
   if (alpha == ZERO) {
+#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+    logVmmApplyPath("alpha_zero");
+#endif
     if (beta == ZERO) {
       Y_in.putScalar(ZERO);
     } else if (beta != ONE) {
@@ -4769,9 +4790,14 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     if (vmmContext_ && Details::Behavior::experimentalVmm() &&
         Details::Behavior::experimentalVmmNativeMv() &&
         this->tryApplyVmm(X_in, Y_in, alpha, beta)) {
+      logVmmApplyPath("vmm");
       return;
     }
   }
+#endif
+
+#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+  logVmmApplyPath("classic");
 #endif
 
   // Before comm and local spmv
