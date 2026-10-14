@@ -115,7 +115,7 @@ for entry in "${cases[@]}"; do
     printf '# TPETRA_EXPERIMENTAL_VMM=%s\n' "$enabled"
     printf '# TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=%s\n' "$native"
     printf '# TPETRA_EXPERIMENTAL_VMM_STATISTICS=%s\n' "$stats"
-    printf '# TPETRA_VMM_TEST_MAP_MODE=%s\n' "$map_mode"
+    printf '# VMM_TEST_MAP_MODE=%s\n' "$map_mode"
     printf '# TPETRA_EXPERIMENTAL_VMM_IPC=posix\n'
     printf '# TPETRA_SYNCHRONIZE_APPLY=0 TPETRA_DEBUG=0\n'
   } > "$log"
@@ -123,7 +123,7 @@ for entry in "${cases[@]}"; do
   if TPETRA_EXPERIMENTAL_VMM="$enabled" \
      TPETRA_EXPERIMENTAL_VMM_NATIVE_MV="$native" \
      TPETRA_EXPERIMENTAL_VMM_STATISTICS="$stats" \
-     TPETRA_VMM_TEST_MAP_MODE="$map_mode" \
+     VMM_TEST_MAP_MODE="$map_mode" \
      TPETRA_EXPERIMENTAL_VMM_IPC=posix \
      TPETRA_SYNCHRONIZE_APPLY=0 \
      TPETRA_DEBUG=0 \

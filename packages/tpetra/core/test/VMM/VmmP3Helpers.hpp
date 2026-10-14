@@ -24,11 +24,11 @@ using namespace TpetraVmmP2;
 // The same sources serve as the pre-refactor baseline and post-refactor
 // acceptance tests.  This variable affects *tests only*, not Tpetra::Behavior.
 inline bool expectGeneralizedMaps() {
-  const char* raw = std::getenv("TPETRA_VMM_TEST_MAP_MODE");
+  const char* raw = std::getenv("VMM_TEST_MAP_MODE");
   if (raw == nullptr || std::string(raw) == "baseline") return false;
   if (std::string(raw) == "generalized") return true;
   throw std::invalid_argument(
-      "TPETRA_VMM_TEST_MAP_MODE must be baseline or generalized");
+      "VMM_TEST_MAP_MODE must be baseline or generalized");
 }
 
 inline auto explicitMap(std::initializer_list<go_type> rank0,

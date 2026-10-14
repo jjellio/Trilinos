@@ -7,6 +7,8 @@ TRIBITS_ADD_EXECUTABLE(
   SOURCES VmmTestMain.cpp VmmSmokeTests.cpp VmmSpmvTests.cpp
           VmmMultiVectorTests.cpp VmmFallbackTests.cpp
           VmmMapTests.cpp
+          VmmBoundaryTests.cpp VmmDebugTests.cpp VmmTimerTests.cpp
+          VmmFabricTests.cpp
   COMM mpi
 )
 
@@ -105,7 +107,7 @@ MACRO(TPETRA_VMM_REGISTER_P3_CASE caseName vmmEnabled nativeMv statsEnabled)
       "TPETRA_EXPERIMENTAL_VMM_IPC=posix"
       "TPETRA_SYNCHRONIZE_APPLY=0"
       "TPETRA_DEBUG=0"
-      "TPETRA_VMM_TEST_MAP_MODE=${Tpetra_VMM_P3_MAP_MODE}"
+      "VMM_TEST_MAP_MODE=${Tpetra_VMM_P3_MAP_MODE}"
     RUN_SERIAL
     TIMEOUT 180
     STANDARD_PASS_OUTPUT
@@ -120,6 +122,73 @@ TPETRA_VMM_REGISTER_P3_CASE(MatrixOnly                1 0 1)
 TPETRA_VMM_REGISTER_P3_CASE(NativeRequestedGlobalOff  0 1 1)
 TPETRA_VMM_REGISTER_P3_CASE(VmmNoStats                1 1 0)
 TPETRA_VMM_REGISTER_P3_CASE(VmmStats                  1 1 1)
+
+# P4 is test-only.  Leave debug and synchronizeApply OFF in all normal
+# scenarios; dedicated Debug and Timer jobs opt in independently.  Using
+# MPI_EXEC_PRE/POST_NUMPROCS_FLAGS for rank-to-GPU binding is supported.
+MACRO(TPETRA_VMM_REGISTER_P4_CASE name group vmmEnabled nativeMv statsEnabled debugEnabled syncEnabled)
+  TRIBITS_ADD_TEST(
+    VmmRegression
+    NAME VMM_P4_NP2_${name}
+    ARGS "--group=${group} --globally-reduce-test-result"
+    COMM mpi
+    NUM_MPI_PROCS 2
+    ENVIRONMENT
+      "TPETRA_EXPERIMENTAL_VMM=${vmmEnabled}"
+      "TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=${nativeMv}"
+      "TPETRA_EXPERIMENTAL_VMM_STATISTICS=${statsEnabled}"
+      "TPETRA_EXPERIMENTAL_VMM_IPC=posix"
+      "TPETRA_SYNCHRONIZE_APPLY=${syncEnabled}"
+      "TPETRA_DEBUG=${debugEnabled}"
+      "VMM_TEST_MAP_MODE=${Tpetra_VMM_P3_MAP_MODE}"
+    RUN_SERIAL
+    TIMEOUT 180
+    STANDARD_PASS_OUTPUT
+  )
+ENDMACRO()
+
+# Three boundary configurations test zero-local rows and 1/7 ownership.
+TPETRA_VMM_REGISTER_P4_CASE(BoundaryClassic VMM_Boundary 0 0 0 0 0)
+TPETRA_VMM_REGISTER_P4_CASE(BoundaryVmmNoStats VMM_Boundary 1 1 0 0 0)
+TPETRA_VMM_REGISTER_P4_CASE(BoundaryVmmStats VMM_Boundary 1 1 1 0 0)
+
+# Only these two jobs intentionally exercise DistObject's debug Map checks.
+TPETRA_VMM_REGISTER_P4_CASE(DebugClassic VMM_Debug 0 0 1 1 0)
+TPETRA_VMM_REGISTER_P4_CASE(DebugVmm VMM_Debug 1 1 1 1 0)
+
+# SynchronizeApply is enabled for timer diagnostics ONLY.  Ordinary P0-P3
+# and P4 Boundary/Debug tests remain in asynchronous execution mode.
+TPETRA_VMM_REGISTER_P4_CASE(TimerClassic VMM_Timer 0 0 1 0 1)
+TPETRA_VMM_REGISTER_P4_CASE(TimerVmm VMM_Timer 1 1 1 0 1)
+
+# Always-safe CUDA capability probe: lack of Fabric support reports a
+# structured "supported=0" rather than failing ordinary regression tests.
+TPETRA_VMM_REGISTER_P4_CASE(FabricProbe VMM_FabricProbe 0 0 0 0 0)
+
+# Fabric peer IPC is a separate explicit machine/operator opt-in.  Enabling
+# it without CUDA fabric support may make the production VMM allocator abort.
+OPTION(Tpetra_VMM_P4_ENABLE_FABRIC_TESTS
+       "Opt in to Fabric VMM IPC tests only on verified Fabric-capable GPU nodes"
+       OFF)
+IF(Tpetra_VMM_P4_ENABLE_FABRIC_TESTS)
+  TRIBITS_ADD_TEST(
+    VmmRegression
+    NAME VMM_P4_NP2_FabricTimer
+    ARGS "--group=VMM_Timer --globally-reduce-test-result"
+    COMM mpi
+    NUM_MPI_PROCS 2
+    ENVIRONMENT
+      "TPETRA_EXPERIMENTAL_VMM=1"
+      "TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=1"
+      "TPETRA_EXPERIMENTAL_VMM_STATISTICS=1"
+      "TPETRA_EXPERIMENTAL_VMM_IPC=fabric"
+      "TPETRA_SYNCHRONIZE_APPLY=1"
+      "TPETRA_DEBUG=0"
+    RUN_SERIAL
+    TIMEOUT 240
+    STANDARD_PASS_OUTPUT
+  )
+ENDIF()
 
 # The configured TriBITS MPI launcher may supply:
 #   MPI_EXEC_PRE_NUMPROCS_FLAGS  = --bind-to;none

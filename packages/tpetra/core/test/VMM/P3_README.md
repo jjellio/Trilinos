@@ -26,7 +26,7 @@ The two modes deliberately have different assertions:
   domain Map (G05) must still refuse direct VMM SpMV *collectively* and retain
   the classic path (where supported).
 
-Neither mode changes any library behavior; `TPETRA_VMM_TEST_MAP_MODE` is only
+Neither mode changes any library behavior; `VMM_TEST_MAP_MODE` is only
 consulted by the C++ test fixture and external runner.
 
 ## Fixtures and checks
