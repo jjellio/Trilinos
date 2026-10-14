@@ -3869,7 +3869,7 @@ class CrsMatrix : public RowMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>,
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
   // Passive experimental extension points.  Neither invokes VMM yet.
-  void initializeVmmContext(const Teuchos::RCP<Teuchos::ParameterList>& params);
+  void initializeVmmContext();
   bool tryApplyVmm(const MV& X_in, MV& Y_in, Scalar alpha, Scalar beta) const;
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 

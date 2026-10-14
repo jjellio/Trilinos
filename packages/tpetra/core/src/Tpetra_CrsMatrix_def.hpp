@@ -673,7 +673,7 @@ CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     // This constructor produces a fill-complete CrsMatrix directly; unlike
     // ordinary assembly, it never calls CrsMatrix::fillComplete().
     // Galeri's stencil matrices use this construction path.
-    this->initializeVmmContext(params);
+    this->initializeVmmContext();
   #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 
 }
@@ -4189,7 +4189,6 @@ template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     resumeFill(const Teuchos::RCP<Teuchos::ParameterList>& params) {
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
-  // This will require collective destruction when the arena is activated.
   vmmContext_.reset();
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
   if (!isStaticGraph()) {  // Don't resume fill of a nonowned graph.
@@ -4234,12 +4233,18 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 // All ranks must enable the same experimental VMM layout computation.
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
-    initializeVmmContext(const Teuchos::RCP<Teuchos::ParameterList>& /*params*/) {
+    initializeVmmContext() {
   const auto logVmmSkip = [&](const char* reason) {
+    // this lambda logs why vmm would be rejected
+    // it only fires if we set TPETRA_EXPERIMENTAL_VMM_STATISTICS=1
     if (!Details::Behavior::experimentalVmmStatistics()) return;
+
+    // report once per object (e.g., rank0)
     const auto comm = this->getComm();
     if (comm.is_null() || comm->getRank() != 0) return;
+
     // Match the DistObject pointer used by the fillComplete/label hooks.
+    // use DistObject here, because set Label will emit the label later + pointer
     const auto* identity = static_cast<const dist_object_type*>(this);
     std::ostringstream os;
     os << "[TPETRA_MATRIX] event=vmmSkip"
@@ -4250,6 +4255,7 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
        << " reason=" << reason << '\n';
     std::cout << os.str() << std::flush;
   };
+
   // Never enter the VMM layout collectives when experimental VMM is off.
   if (!Details::Behavior::experimentalVmm()) {
     logVmmSkip("vmm_disabled");
@@ -4282,6 +4288,8 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     const auto rowMap = this->getRowMap();
     const auto rangeMap = this->getRangeMap();
     const auto comm = this->getComm();
+
+    // JE: it feels like this is unneeded, but some maps are optional
     // Preserve the original eligibility criteria.  Priority-coded reasons
     // make a rejection on another rank visible in rank 0's statistics log;
     // the single MIN reduction replaces the original eligibility reduction.
@@ -4301,8 +4309,8 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
       return;
     }
 
-    // Validate the IPC choice collectively too.  A mixture of POSIX and
-    // Fabric constructors would otherwise deadlock during handle exchange.
+    Teuchos::TimeMonitor timer(*Teuchos::TimeMonitor::getNewTimer("vmmContext Ctor"));
+    // get the IpcMode (it will be consistent across all processes)
     const std::string ipcName = Details::Behavior::experimentalVmmIpc();
     auto ipcMode = VmmExperiment::IpcMode::Posix;
     if (ipcName == "posix") {
@@ -4310,29 +4318,14 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     } else if (ipcName == "fabric") {
       ipcMode = VmmExperiment::IpcMode::Fabric;
     }
-    /*
-    int minMode = -1;
-    int maxMode = -1;
-    Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
-                                 localMode, Teuchos::outArg(minMode));
-    Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX,
-                                 localMode, Teuchos::outArg(maxMode));
 
-    // we can't do VMM
-    // All participating ranks must select the same Experimental VMM IPC
-    // value ('posix' or 'fabric').
-    if (minMode < 0 || minMode != maxMode) return;
-
-    const auto ipcMode = (minMode == 0)
-        ? VmmExperiment::IpcMode::Posix
-        : VmmExperiment::IpcMode::Fabric;
-    */
     // Compute the deterministic plan without creating an arena.  Both the
     // matrix and a later VMM-backed Vector will use this same layout policy.
     VmmExperiment::VmmComm vmmComm(domainMap->getComm());
     auto layout = VmmExperiment::VmmLayout<impl_scalar_type>::compute(
         domainMap->getLocalNumElements(), ipcMode, vmmComm);
 
+    // JE: this seems silly, we will not exceed a signed 64bit value ever
     // KokkosSparse::CrsMatrix uses a signed ordinal for numCols() as well
     // as column indices.  Unsupported extents use ordinary Tpetra apply.
     // Every rank computed the same total padded extent.
@@ -4344,18 +4337,7 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 
     // The context owns translated CRS indices and borrows Tpetra values /
     // row offsets; no CUDA physical or virtual vector storage is allocated.
-    {
-      Teuchos::TimeMonitor timer(*Teuchos::TimeMonitor::getNewTimer("vmmContext Ctor"));
-      vmmContext_ = std::make_shared<vmm_context_type>(*this, std::move(layout));
-    }
-    /*
-    std::fprintf(stderr,
-        "VMM INIT: rank=%d matrix=%p context=%p sizeof=%zu\n",
-        this->getComm()->getRank(),
-        static_cast<const void*>(this),
-        static_cast<const void*>(vmmContext_.get()),
-        sizeof(*this));
-    */
+    vmmContext_ = std::make_shared<vmm_context_type>(*this, std::move(layout));
     return;
   }
 #else
@@ -4547,7 +4529,7 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   this->checkInternalState();
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
   // Maps, graph and KokkosSparse local CSR are now finalized.
-  this->initializeVmmContext(params);
+  this->initializeVmmContext();
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 }  // fillComplete(domainMap, rangeMap, params)
 
@@ -4597,7 +4579,7 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   checkInternalState();
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
   // The expert completion path also finalizes the local CSR representation.
-  this->initializeVmmContext(params);
+  this->initializeVmmContext();
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 }
 
