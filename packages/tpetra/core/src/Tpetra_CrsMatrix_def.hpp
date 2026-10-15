@@ -4724,13 +4724,26 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
         vmmContext_->isCompatibleApplyLayout(*xLayout);
 
     if (!eligible) return false;
+    std::optional<Teuchos::TimeMonitor> syncTimer;
+    std::optional<Teuchos::TimeMonitor> applyTimer;
+
+
+    if (Details::Behavior::synchronizeApply())
+       syncTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: sync"));
+    // Honor Tpetra's host/device coherence contract.
+    (void)X_in.getLocalViewDevice(Access::ReadOnly);
+
+    // Make the input available to all participating ranks.
+    this->getComm()->barrier();
+    if (Details::Behavior::synchronizeApply())
+      syncTimer.reset(); // stop
 
     // The local X view aliases its mapped VMM allocation, with no separate
     // publication copy.  Producer/consumer synchronization is the caller's
     // responsibility, not part of the SpMV dispatch or kernel.
-    std::optional<Teuchos::TimeMonitor> stageTimer;
     if (Details::Behavior::synchronizeApply())
-      stageTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: direct spmv"));
+      applyTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: direct spmv"));
+
     vmmContext_->applyGlobalPointer(xGlobal, Y_in, alpha, beta);
 
     return true;
