@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Validate P3 numerical results, matrix eligibility, and per-rank dispatch.
 
-The matrix_generalized mode verifies M5.2 without prematurely assuming that
-M5.4 removes raw Map-pointer dispatch checks.  Older profiles remain available.
+The generalized default verifies M5.4: independently constructed but
+semantically equivalent Maps must select direct VMM, including permuted GIDs.
+The earlier test profiles remain available for historical checkouts.
 """
 
 import argparse
@@ -26,7 +27,7 @@ SKIP = re.compile(
 LABELS = (
     "P3_G01_Interleaved", "P3_G02_Permuted", "P3_G03_XDistinct",
     "P3_G03_YDistinct", "P3_G03_BothDistinct",
-    "P3_G05_NonOneToOneDomain",
+    "P3_G03_DistinctPermuted", "P3_G05_NonOneToOneDomain",
 )
 
 
@@ -36,9 +37,9 @@ def check_output(content: str, vmm: bool, native: bool, stats: bool,
     if "End Result: TEST PASSED" not in content:
         errors.append("Teuchos did not report End Result: TEST PASSED")
     summaries = [tuple(map(int, match.groups())) for match in SUMMARY.finditer(content)]
-    if not any(total >= 5 and run == 5 and passed == 5 and failed == 0
+    if not any(total >= 6 and run == 6 and passed == 6 and failed == 0
                for total, run, passed, failed in summaries):
-        errors.append(f"expected all five Map tests to run/pass, got {summaries}")
+        errors.append(f"expected all six Map tests to run/pass, got {summaries}")
 
     found = APPLY.findall(content)
     if not stats:
@@ -55,6 +56,7 @@ def check_output(content: str, vmm: bool, native: bool, stats: bool,
         "P3_G03_XDistinct": "vmm" if direct_distinct else "classic",
         "P3_G03_YDistinct": "vmm" if direct_distinct else "classic",
         "P3_G03_BothDistinct": "vmm" if direct_distinct else "classic",
+        "P3_G03_DistinctPermuted": "vmm" if direct_distinct else "classic",
         # Non-1:1 domain is **never** valid for addressed CRS.
         "P3_G05_NonOneToOneDomain": "classic",
     }
@@ -88,6 +90,7 @@ def check_output(content: str, vmm: bool, native: bool, stats: bool,
             "P3_G01_Interleaved": None if matrix_generalized else "map_not_contiguous",
             "P3_G02_Permuted": None if matrix_generalized else "map_not_contiguous",
             "P3_G03_XDistinct": None,
+            "P3_G03_DistinctPermuted": None if matrix_generalized else "map_not_contiguous",
             "P3_G05_NonOneToOneDomain": (
                 "domain_map_not_one_to_one" if matrix_generalized else "map_not_contiguous"
             ),
@@ -107,7 +110,7 @@ def main():
     parser.add_argument("--native", type=int, choices=(0, 1), required=True)
     parser.add_argument("--stats", type=int, choices=(0, 1), required=True)
     parser.add_argument("--mode", choices=("baseline", "allocation_only", "matrix_generalized", "generalized"),
-                        default="matrix_generalized")
+                        default="generalized")
     parser.add_argument("--np", type=int, default=2)
     args = parser.parse_args()
     if args.np != 2:
@@ -124,7 +127,7 @@ def main():
             print(f"[VMM_P3] result=FAIL reason={error}", file=sys.stderr)
         return 1
     print(f"[VMM_P3] result=PASS mode={args.mode} vmm={args.vmm} "
-          f"native={args.native} stats={args.stats} ranks={args.np} cases=5 "
+          f"native={args.native} stats={args.stats} ranks={args.np} cases=6 "
           f"apply_events={args.np * len(LABELS) if args.stats else 0}")
     return 0
 

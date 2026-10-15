@@ -12,8 +12,8 @@ Usage: run_vmm_p4_tests.sh --exe /path/to/TpetraCore_VmmRegression.exe [options]
   --np N            MPI ranks; P4 requires exactly 2
   --outdir DIR      Logs and results.tsv (default ./vmm-p4-results)
   --timeout SEC     Wall-time limit per MPI job (default 180)
-  --mode MODE       matrix_generalized (default M5.2), allocation_only (M5.1),
-                    baseline (M4.1), or generalized (future M5.4 acceptance)
+  --mode MODE       generalized (default M5.4), matrix_generalized (M5.2/M5.3),
+                    allocation_only (M5.1), or baseline (M4.1)
   --quick           Boundary classic, boundary VMM stats, debug classic,
                     VMM timer, and Fabric capability probe (default)
   --full            3 boundary, 2 debug jobs (nine tests each), 2 timer,
@@ -33,7 +33,7 @@ np=2
 outdir=./vmm-p4-results
 timeout_sec=180
 mode=quick
-map_mode=matrix_generalized
+map_mode=generalized
 fabric_requested=0
 while (($#)); do
   case "$1" in

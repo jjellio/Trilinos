@@ -28,7 +28,7 @@ enum class MapTestMode { Baseline, AllocationOnly, MatrixGeneralized, Generalize
 
 inline MapTestMode mapTestMode() {
   const char* raw = std::getenv("VMM_TEST_MAP_MODE");
-  if (raw == nullptr) return MapTestMode::MatrixGeneralized;
+  if (raw == nullptr) return MapTestMode::Generalized;
   if (std::string(raw) == "baseline") return MapTestMode::Baseline;
   if (std::string(raw) == "allocation_only") return MapTestMode::AllocationOnly;
   if (std::string(raw) == "matrix_generalized")
@@ -145,9 +145,8 @@ inline auto makeDiagonalWithDomain(const Teuchos::RCP<const map_type>& rowMap,
   return A;
 }
 
-// Matrix VMM addressing is generalized at M5.2, but raw Map-pointer
-// dispatch checks remain until M5.4.  Check the construction-time skip
-// reason separately from the SpMV execution path.
+// Matrix addressing and direct dispatch are generalized by M5.4.  Check
+// construction-time eligibility separately from the SpMV execution path.
 // Capture only around *construction*, not around an MPI or device epoch.
 template <class MatrixFactory>
 auto makeAndCheckMatrix(const MatrixFactory& factory,

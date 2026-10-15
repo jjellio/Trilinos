@@ -4688,9 +4688,11 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 }
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
-// Direct CUDA VMM SpMV.  Both the dispatch decision and peer access epochs
-// are collective over the matrix communicator.  Unsupported inputs fall
-// through to Tpetra's original Import/local-SpMV/Export implementation.
+// Direct CUDA VMM SpMV.  The matrix and MV have already established their
+// respective VMM representations at construction.  This local dispatch trusts
+// Tpetra's domain/X and range/Y Map contract, just like classical apply.
+// The optional CrsMatrix debug path validates that contract collectively.
+// Unsupported inputs fall back to the ordinary Import/local-SpMV/Export path.
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     tryApplyVmm(const MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& X_in,
@@ -4700,32 +4702,32 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
     if (!vmmContext_) return false;
 
-    // Never enter the peer-read barriers on just a subset of ranks.  The
-    // first local failure (including an ordinary X) forces *all* ranks to
-    // execute the classical Tpetra apply path.
-    const auto* xLayout = X_in.getVmmLayout();
+    // A nonnull VMM pointer/layout requires a canonical, full one-column
+    // MultiVector representation: isVmmBacked(), X shape/stride, and Map
+    // presence are already enforced by these accessors.  Do not compare Map
+    // object addresses or perform a potentially collective Map::isSameAs().
     const auto* xGlobal = X_in.getVmmGlobalPtr();
-    const bool eligible = xLayout != nullptr && xGlobal != nullptr &&
-        X_in.isVmmBacked() &&
-        X_in.getNumVectors() == 1 && Y_in.getNumVectors() == 1 &&
+    const auto* xLayout = X_in.getVmmLayout();
+    if (xGlobal == nullptr || xLayout == nullptr) return false;
+
+    // The caller guarantees the domain/X and range/Y Map contract.  Compare
+    // only fixed-size physical layout metadata here; the exact per-rank
+    // comparison remains in Behavior::debug("CrsMatrix") at apply() entry.
+    const bool eligible =
+        Y_in.getNumVectors() == 1 &&
         Y_in.getLocalLength() == static_cast<std::size_t>(this->getLocalNumRows()) &&
-        X_in.isConstantStride() && Y_in.isConstantStride() &&
-        !X_in.getMap().is_null() && !Y_in.getMap().is_null() &&
-        X_in.getMap().getRawPtr() == this->getDomainMap().getRawPtr() &&
-        Y_in.getMap().getRawPtr() == this->getRangeMap().getRawPtr() &&
+        Y_in.isConstantStride() &&
         this->getGraph()->getExporter().is_null() &&
         this->getRangeMap()->isDistributed() &&
         &X_in != &Y_in &&
-        (!Y_in.isVmmBacked() || Y_in.getVmmGlobalPtr() != xGlobal) &&
-        vmmContext_->isCompatibleLayout(*xLayout);
+        Y_in.getVmmGlobalPtr() != xGlobal &&
+        vmmContext_->isCompatibleApplyLayout(*xLayout);
 
-    if (! eligible) return false;
+    if (!eligible) return false;
 
-    // The local Tpetra view aliases the physical VMM allocation.  If its
-    // host mirror contains newer values, this brings them into that same
-    // allocation; it is NOT a publish/copy into a second global arena.
-    // Producer completion must precede MPI's publication barrier, since
-    // MPI_Barrier alone does not complete asynchronous CUDA work.
+    // The local X view aliases its mapped VMM allocation, with no separate
+    // publication copy.  Producer/consumer synchronization is the caller's
+    // responsibility, not part of the SpMV dispatch or kernel.
     std::optional<Teuchos::TimeMonitor> stageTimer;
     if (Details::Behavior::synchronizeApply())
       stageTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: direct spmv"));
@@ -4794,9 +4796,9 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     defined(HAVE_TPETRA_INST_CUDA) && \
     defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
   if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
-    // The matrix's context was constructed collectively at fillComplete.
-    // Native MV allocation is also collective.  Eligibility must be decided
-    // collectively HERE, rather than skipping tryApplyVmm on just one rank.
+    // The matrix context and native MV allocation were selected collectively
+    // at construction.  With Tpetra-compatible X/Y Maps, all ranks take the
+    // same dispatch path without any collectives inside this apply.
     if (vmmContext_ && Details::Behavior::experimentalVmm() &&
         Details::Behavior::experimentalVmmNativeMv() &&
         this->tryApplyVmm(X_in, Y_in, alpha, beta)) {

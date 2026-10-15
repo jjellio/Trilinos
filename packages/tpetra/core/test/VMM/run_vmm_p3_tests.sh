@@ -12,16 +12,16 @@ Usage: run_vmm_p3_tests.sh --exe /path/to/TpetraCore_VmmRegression.exe [options]
   --np N            MPI ranks (P3 requires 2)
   --outdir DIR      Per-scenario logs and results.tsv (default ./vmm-p3-results)
   --timeout SEC     Per-MPI job timeout (default 180)
-  --mode MODE       matrix_generalized (default M5.2), allocation_only (M5.1),
-                    baseline (M4.1), generalized (future M5.4 acceptance)
+  --mode MODE       generalized (default M5.4), matrix_generalized (M5.2/M5.3),
+                    allocation_only (M5.1), baseline (M4.1)
   --quick           Classic, full VMM without stats, full VMM+stats (default)
   --full            All six VMM/native/stats combinations
   -h, --help        Show this help
 
 Launch: mpirun --bind-to none -np 2 <gpu_bind.sh> <exe> --group=VMM_Map
 CTest: ctest -j1 -R VMM_P3_NP2 -V
-Generalized mode is expected to FAIL until M5.4 removes Map-pointer checks.
-Historical baseline mode will fail native-MV Map storage checks after M5.1.
+Older modes represent historical implementation behavior, not M5.4:
+with native VMM enabled, G03 takes direct VMM in the current source.
 USAGE
 }
 
@@ -32,7 +32,7 @@ np=2
 outdir='./vmm-p3-results'
 timeout_sec=180
 mode=quick
-map_mode=matrix_generalized
+map_mode=generalized
 
 while (($#)); do
   case "$1" in

@@ -5,8 +5,8 @@
 // ****************************************************************************
 // @HEADER
 // P3 G01-G05: VMM Map contracts across development milestones.
-// "matrix_generalized" tests M5.2 column addressing, while distinct
-// Map-object dispatch remains classic until M5.4 ("generalized").
+// "generalized" tests M5.4's Map-identity-independent direct dispatch;
+// older profiles preserve the earlier allocation and indexing expectations.
 
 #include "VmmP3Helpers.hpp"
 
@@ -93,6 +93,33 @@ TEUCHOS_UNIT_TEST(VMM_Map, G03_EquivalentDistinctMaps) {
   A->setObjectLabel("P3_G03_BothDistinct");
   executeAndCheck(*A, distinctX, distinctY, wanted, "P3_G03_BothDistinct",
                   false, out, success);
+}
+
+// Combines M5.2's noncontiguous/locally permuted domain addressing with
+// M5.4's distinct-but-equivalent Map dispatch.  Both independently
+// constructed Maps must supply identical owner-local-index ordering.
+TEUCHOS_UNIT_TEST(VMM_Map, G03_DistinctPermutedMaps) {
+  using namespace TpetraVmmP3;
+  if (!twoRanks(out, success)) return;
+  const auto primary = permutedMap();
+  const auto distinct = permutedMap();
+  TEST_ASSERT(primary.getRawPtr() != distinct.getRawPtr());
+  TEST_ASSERT(primary->isSameAs(*distinct));
+  TEST_ASSERT(!primary->isContiguous());
+
+  const bool matrixGeneralized = expectMatrixGeneralized();
+  const auto A = makeAndCheckMatrix(
+      [&]() { return makeNeighborMatrix(primary, "P3_G03_DistinctPermuted"); },
+      "P3_G03_DistinctPermuted", matrixGeneralized ? "" : "map_not_contiguous",
+      out, success);
+  vector_type X(distinct, 1), Y(distinct, 1);
+  checkStorage(X, nativeExpected() && expectGeneralizedMvAllocation(),
+               "G03 permuted distinct X", out, success);
+  checkStorage(Y, nativeExpected() && expectGeneralizedMvAllocation(),
+               "G03 permuted distinct Y", out, success);
+  prepareX(X);
+  executeAndCheck(*A, X, Y, standardOrVmmPath(expectGeneralizedMaps()),
+                  "P3_G03_DistinctPermuted", false, out, success);
 }
 
 TEUCHOS_UNIT_TEST(VMM_Map, G04_OverlappingMV) {

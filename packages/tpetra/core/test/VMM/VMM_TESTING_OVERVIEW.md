@@ -8,7 +8,7 @@
 
 The VMM prototype gives a Tpetra `MultiVector` GPU memory that other GPUs on the same node can address. An alternative, locally stored CRS representation can then refer directly to those values, allowing SpMV to avoid the conventional MPI packing, transfer, and unpacking of remote vector elements when the direct VMM path is eligible.
 
-The optimization must not change the mathematical meaning of `CrsMatrix::apply()`. It must also retain Tpetra's classical path for cases the experimental implementation does not support. This test suite was built *before* relaxing the original Map restrictions and runtime eligibility checks, so it can distinguish an intentional expansion of VMM support from a numerical, ownership, or dispatch regression.
+The optimization must not change the mathematical meaning of `CrsMatrix::apply()`. It must also retain Tpetra's classical path for cases the experimental implementation does not support. This test suite began *before* relaxing the original Map restrictions and runtime eligibility checks and now exercises those changes directly, so it can distinguish an intentional expansion of VMM support from a numerical, ownership, or dispatch regression.
 
 The suite has two complementary requirements:
 
@@ -24,10 +24,10 @@ Tests live inside Trilinos, using **Teuchos unit tests**, the **TriBITS/CTest** 
 | **P0 — Harness** | Two-rank CUDA/MPI smoke test; physical GPU identity check; launch and logging infrastructure | A working in-tree build, distinct GPU assignments, basic remote references, and repeatable configuration sweeps |
 | **P1 — SpMV correctness** | Diagonal, boundary-crossing, all-remote and stencil matrices; `alpha`/`beta` combinations | Numerical semantics and proof of direct VMM versus classical dispatch on **both** ranks |
 | **P2 — MultiVector and fallback** | Allocation policy; multicolumn fallback; shallow/deep copies and views; host/device coherence; allocation lifetime; Exporter, replicated-output and transpose cases | Storage ownership, host/device correctness, and preserved classical behavior when VMM is ineligible |
-| **P3 — Map contracts** | Interleaved and locally permuted GIDs; equivalent-but-distinct Map objects; overlapping ownership; non-one-to-one domain Map | A measurable **pre-refactor baseline** and a separate **post-refactor acceptance target** for generalized Maps |
+| **P3 — Map contracts** | Interleaved/permuted GIDs; distinct equivalent Maps, including permuted Maps; overlapping ownership | Historical profiles and M5.4's generalized direct-VMM dispatch with independent numerical oracles |
 | **P4 — Debug and boundaries** | Zero-local-row and skewed partitions; invalid X/Y Map diagnostics; timer counters; optional Fabric probe | Empty partitions, rank-consistent selection, existing DistObject diagnostics, M5.3 VMM Map semantic checks, and diagnostic observability |
 
-The milestone-specific documents are the source of detail: [P1](P1_README.md), [P2](P2_README.md), [P3](P3_README.md), and [P4](P4_README.md). The directory's [README](README.md) describes the P0 harness. P3 also carries `p3_expected_paths.tsv` for present-versus-future expectations. The C++ test sources provide the definitive fixtures and assertions.
+The milestone-specific documents are the source of detail: [P1](P1_README.md), [P2](P2_README.md), [P3](P3_README.md), and [P4](P4_README.md). The directory's [README](README.md) describes the P0 harness. P3 also carries `p3_expected_paths.tsv` for historical-versus-current expectations. The C++ test sources provide the definitive fixtures and assertions.
 
 ### Intentional design choices
 
@@ -72,8 +72,8 @@ TESTS=/path/to/trilinos/packages/tpetra/core/test/VMM
 "$TESTS/run_vmm_tests.sh"    --exe "$EXE" --full --outdir ./vmm-p0-results
 "$TESTS/run_vmm_p1_tests.sh" --exe "$EXE" --full --outdir ./vmm-p1-results
 "$TESTS/run_vmm_p2_tests.sh" --exe "$EXE" --full --outdir ./vmm-p2-results
-"$TESTS/run_vmm_p3_tests.sh" --exe "$EXE" --full --outdir ./vmm-p3-results --mode matrix_generalized
-"$TESTS/run_vmm_p4_tests.sh" --exe "$EXE" --full --outdir ./vmm-p4-results --mode matrix_generalized
+"$TESTS/run_vmm_p3_tests.sh" --exe "$EXE" --full --outdir ./vmm-p3-results --mode generalized
+"$TESTS/run_vmm_p4_tests.sh" --exe "$EXE" --full --outdir ./vmm-p4-results --mode generalized
 ```
 
 The runners default to the site's `~/cronus/gpu_bind.sh`; supply `--gpu-bind /path/to/wrapper` if different. Each creates an environment-specific log and a machine-readable `results.tsv`; timeouts, failed numerical assertions, incorrect path events, and unexpected job exits are failures. See each runner's `--help` for available filters.
@@ -118,13 +118,13 @@ The following results were reviewed from the supplied two-GPU run archives on **
 
 The P4 Fabric capability probe reported `supported=0` on both ranks (`reason=fabric_allocation`). The development node lacks the required IMEX/Fabric capability; the optional Fabric IPC execution was therefore correctly **skipped**, not counted as a VMM correctness failure. The validated path on this system is **POSIX IPC**.
 
-This is a focused **NP=2, two-GPU prototype baseline**. It establishes correctness and dispatch behavior for the exercised fixtures, not comprehensive production qualification, performance scaling, or 4/8-GPU coverage. M5.2 passed the user's full 32/32 CTest suite on the two-GPU POSIX node. M5.3 adds debug-only semantic checks to noncontiguous, one-to-one matrix addressing, pending validation on the two-GPU node.
+This is a focused **NP=2, two-GPU prototype baseline**. It establishes correctness and dispatch behavior for the exercised fixtures, not comprehensive production qualification, performance scaling, or 4/8-GPU coverage. M5.2 passed 32/32 registered CTests and M5.3 passed the full 36/36 two-GPU POSIX suite, including debug Map mismatch diagnostics. M5.4's generalized direct dispatch and the new G03 permuted-equivalent case are implemented but await CUDA/MPI validation.
 
 ## Using the suite during the Map/eligibility refactor
 
 1. **Keep P1, P2, and P4 green.** These protect the numerical kernel, MultiVector ownership, fallback routes, and debug/boundary semantics as implementation details change. P0 continues to protect the harness and launcher.
-2. **Use P3 `matrix_generalized` for M5.2.** G01/G02 have native VMM storage and now execute direct VMM SpMV through directory-derived owner/local indices; G03 still uses classic SpMV because it passes distinct Map objects; G05 has an ambiguous domain Map and remains classical. The historical `baseline` and `allocation_only` modes are retained for earlier code revisions and intentionally differ from M5.2.
-3. **Reserve P3 `generalized` for M5.4.** This final acceptance specification is not an enable flag. It additionally expects direct VMM for equivalent-but-distinct Map objects after debug validation and pointer-check cleanup; ambiguous non-one-to-one domain Maps remain a classical fallback.
+2. **Use P3 `generalized` for M5.4.** G01/G02 and G03 (including independently created equivalent permuted Maps) execute direct VMM using canonical native allocations. G05's non-one-to-one domain remains classical. Historical profiles are retained but no longer match the current production implementation when native VMM is enabled.
+3. **Retain P4 debug coverage.** The M5.3 guard diagnoses invalid semantic Maps without putting `Map::isSameAs()` or MPI collectives into release-mode `apply()`. The exhaustive physical-layout comparison remains debug-only; release dispatch examines fixed-size metadata.
 4. **Investigate failures in layers:** GPU binding → object allocation (`storage=vmm` or skip reason) → matrix VMM context → rank-local `event=apply` → analytic numerical result. Do not interpret an allocator success as proof of kernel dispatch.
 5. **Preserve asynchronous semantics.** New compatibility checks should follow the agreed Tpetra debug contract where appropriate; tests should not force collectives or expensive Map comparisons into normal `CrsMatrix::apply()`.
 

@@ -2,18 +2,17 @@
 
 P3 extends the P0/P1/P2 suite with **five concrete Map fixtures** and a
 test-only four-stage expectation switch: `baseline` (M4.1),
-`allocation_only` (M5.1), `matrix_generalized` (M5.2, current default),
-and `generalized` (M5.4 final target).
+`allocation_only` (M5.1), `matrix_generalized` (M5.2/M5.3 historical),
+and `generalized` (**M5.4 default**).
 The fixture does not change production behavior; the expected outcomes are
 specified in `p3_expected_paths.tsv`.
 
 ## Purpose
 
-Validate M5.2 noncontiguous matrix indexing independently of M5.4
-Map-identity dispatch cleanup, while retaining the M4.1/M5.1 historical
-profiles and the final acceptance requirements.
-Also validate that equivalent, separately constructed Maps eventually use
-direct VMM dispatch without raw-pointer Map comparisons.
+Validate M5.4's Map-identity-independent direct VMM dispatch on top of M5.2
+noncontiguous indexing and M5.3 debug Map diagnostics. Retain the M4.1,
+M5.1, and M5.2/M5.3 test profiles for historical comparisons. The new
+G03 permutation case exercises both generalizations together.
 
 The modes have different assertions:
 
@@ -26,14 +25,15 @@ The modes have different assertions:
   matrix still requires contiguous domain Maps, so G01/G02/G05 execute
   classical SpMV with their existing matrix skip reason. G03 remains classic
   for distinct Map objects. The numerical oracle is unchanged.
-- `matrix_generalized` (**M5.2 default**): G01/G02 now construct VMM-addressed
+- `matrix_generalized` (**M5.2/M5.3 historical**): G01/G02 now construct VMM-addressed
   CRS and execute direct VMM SpMV using directory-resolved owner-local LIDs.
   G03 remains classical because `tryApplyVmm()` still checks Map pointer
   identity. G04 remains VMM allocation-only; G05 rejects non-one-to-one
   matrix ownership at `fillComplete()` with
   `reason=domain_map_not_one_to_one` and executes classical SpMV.
-- `generalized`: the **future M5 acceptance specification**. G01/G02 and G03
-  execute direct VMM SpMV; G04 allocates VMM storage, while G05's non-one-to-one
+- `generalized` (**M5.4 default**): G01/G02 and all G03 cases execute direct
+  VMM SpMV, including independently constructed equivalent noncontiguous Maps
+  with locally permuted GIDs. G04 allocates VMM storage; G05's non-one-to-one
   domain remains a matrix-side rejection and classical fallback.
 
 No test mode changes library behavior; `VMM_TEST_MAP_MODE` is only consulted
@@ -45,15 +45,16 @@ by the C++ fixture and the external runner.
 |---|---|---|---|
 | G01_Interleaved | `[0,2,4,6]` | `[1,3,5,7]` | Remote columns, noncontiguous one-to-one Map; direct at M5.2 |
 | G02_PermutedLocalGids | `[4,0,6,2]` | `[7,3,1,5]` | Preserve owner-local-index order despite scrambled GIDs |
-| G03_EquivalentDistinctMaps | `[0,1,2,3]` | `[4,5,6,7]` | Distinct Map RCP objects whose `isSameAs()` is true; independently test X-only, Y-only, and X/Y mismatches |
+| G03_EquivalentDistinctMaps | `[0,1,2,3]` | `[4,5,6,7]` | Distinct Map RCP objects whose `isSameAs()` is true; independently test X-only, Y-only, and X/Y identity |
+| G03_DistinctPermutedMaps | `[4,0,6,2]` | `[7,3,1,5]` | Distinct but equivalent noncontiguous Maps with locally permuted GIDs and remote reads; tests both M5.2 and M5.4 |
 | G04_OverlappingMV | `[0,1,2,3]` | `[3,4,5,6,7]` | Duplicate GID 3, nine global *slots*; MV allocation not inherently one-to-one |
 | G05_NonOneToOneDomain | row `[0..3]`, domain `[0..3]` | row `[4..7]`, domain `[3..7]` | Matrix uses overlapping domain (GID 3 duplicated); no direct VMM; diagonal analytical result |
 
-For G01/G02/G03, each row has `A(g,g)=2` and `A(g,(g+1)%8)=3`, with
+For G01/G02/G03 (including the permuted G03 case), each row has `A(g,g)=2` and `A(g,(g+1)%8)=3`, with
 `X(g)=g+1`, so `Y(g)=2*(g+1)+3*(((g+1)%8)+1)`. The successor GID is remote
 on **every** G01/G02 row. This catches a wrong owner-local-index mapping,
 not just missing communication. G05 uses a diagonal with `A(g,g)=2` and
-both copies of the duplicated input GID initialized identically. All five
+both copies of the duplicated input GID initialized identically. All six
 cases execute in classic and VMM-enabled configurations and check their own
 analytical results; G04 tests MV allocation and values, not SpMV.
 
@@ -72,36 +73,37 @@ P3 reuses P1's statistics-gated apply path record:
 [TPETRA_MATRIX] event=apply path=classic rank=1 label="P3_G01_Interleaved"
 ```
 
-Five tests emit **six** nontranspose apply events per rank: G01, G02, three
-G03 subcases, and G05. G04 emits none. The C++ tests check native storage
+Six tests emit **seven** nontranspose apply events per rank: G01, G02, four
+G03 variants (X-only, Y-only, X/Y distinct, and permuted), and G05. G04 emits none. The C++ tests check native storage
 independently of matrix SpMV path. Both the in-test trace assertions and the
-standalone validator check rank-local dispatch. In `matrix_generalized`, G01/G02 must not emit a matrix VMM skip; G05
+standalone validator check rank-local dispatch. In `generalized`, G01/G02 and G03's permuted case must not emit a matrix VMM skip; G05
 must emit `reason=domain_map_not_one_to_one` when VMM is enabled. The
 MultiVector allocator never rejects these Maps for contiguity or unique
 ownership. With statistics off no apply records are expected.
 
 ## Build and CTest
 
-Apply `vmm-tpetra-P3.patch` at the Trilinos source root **after P2**, keeping
+Apply `M5_4_dispatch_cleanup.patch` at the Trilinos source root **after M5.3**, keeping
 `Tpetra_ENABLE_VMM_TESTS=ON` and the existing GPU-aware
 `MPI_EXEC_PRE_NUMPROCS_FLAGS` / `MPI_EXEC_POST_NUMPROCS_FLAGS`. Reconfigure
-CMake to discover `VmmMapTests.cpp` and the six new CTest registrations, then:
+CMake to select the `generalized` profile for the existing six CTest registrations, then:
 
 ```bash
 cmake --build /path/to/build --target TpetraCore_VmmRegression --parallel
 ctest --test-dir /path/to/build -j1 -R VMM_P3_NP2 -V
 ```
 
-This selects **six independent, two-rank CTest jobs**, each running all five
-Map tests in a fresh process. The new CMake default is `matrix_generalized`.
+This selects **six independent, two-rank CTest jobs**, each running all six
+Map tests in a fresh process. The new CMake default is `generalized`.
 For an **existing build directory**, explicitly update the cached test mode:
 
 ```text
--DTpetra_VMM_P3_MAP_MODE=matrix_generalized
+-DTpetra_VMM_P3_MAP_MODE=generalized
 ```
 
-Use `matrix_generalized` as the M5.2 acceptance oracle; reserve
-`generalized` for M5.4, after Map-pointer dispatch checks are removed.
+Use `generalized` for M5.4 acceptance. `matrix_generalized` remains the
+historical M5.2/M5.3 oracle and will deliberately fail G03 native-VMM path
+checks against M5.4 source.
 
 The suite intentionally requires both distinct GPUs and all-rank execution
 with the same Map construction order. All test producer/read fences and MPI
@@ -113,7 +115,7 @@ barriers are **caller-side only**; `apply()` remains asynchronous.
 ~/cronus/trilinos/packages/tpetra/core/test/VMM/run_vmm_p3_tests.sh \
   --exe ./packages/tpetra/core/test/VMM/TpetraCore_VmmRegression.exe \
   --gpu-bind "$HOME/cronus/gpu_bind.sh" \
-  --outdir ./vmm-p3-results --full --mode matrix_generalized
+  --outdir ./vmm-p3-results --full --mode generalized
 ```
 
 Use `--quick` for classic, full VMM quiet and full VMM+statistics. Full mode
@@ -121,9 +123,8 @@ runs all six P0–P2 configuration combinations. Each run uses POSIX IPC,
 `TPETRA_SYNCHRONIZE_APPLY=0`, and `TPETRA_DEBUG=0`; no MPI launcher binding
 flags need to be changed beyond those already configured.
 
-Use `--mode generalized` only after the later M5.4 dispatch update.
-The historical `baseline` profile intentionally does not represent M5.1's
-native-MV storage behavior. Every scenario writes a log and one TSV status.
+The historical `baseline`, `allocation_only`, and `matrix_generalized` profiles
+are not expected to pass all native-VMM path assertions against M5.4 source. Every scenario writes a log and one TSV status.
 
 ## Scope / caveats
 

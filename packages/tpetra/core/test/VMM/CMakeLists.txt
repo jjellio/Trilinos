@@ -83,10 +83,10 @@ TPETRA_VMM_REGISTER_P2_GROUP(MultiVector VMM_MultiVector)
 TPETRA_VMM_REGISTER_P2_GROUP(Fallback VMM_Fallback)
 
 # P3 Map-generalization *test* mode.  This is not a production VMM flag.
-# M5.2 supports noncontiguous one-to-one matrix domain Maps, but the
-# apply Map-pointer identity checks remain until M5.4.  Explicitly reset
-# cached CMake values with -DTpetra_VMM_P3_MAP_MODE=matrix_generalized.
-SET(Tpetra_VMM_P3_MAP_MODE "matrix_generalized" CACHE STRING
+# M5.4 exercises noncontiguous one-to-one matrix domain Maps and
+# equivalent-but-distinct X/Y Maps on the direct VMM path. Explicitly
+# reset existing CMake cache values with -DTpetra_VMM_P3_MAP_MODE=generalized.
+SET(Tpetra_VMM_P3_MAP_MODE "generalized" CACHE STRING
     "VMM P3 Map test mode: baseline, allocation_only, matrix_generalized, or generalized")
 SET_PROPERTY(CACHE Tpetra_VMM_P3_MAP_MODE PROPERTY STRINGS
     baseline allocation_only matrix_generalized generalized)

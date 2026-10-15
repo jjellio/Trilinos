@@ -134,9 +134,31 @@ class VmmSpmvContext {
     }
   }
 
-  // Layouts may have unrelated numeric CUDA virtual base addresses on each
-  // MPI rank.  Only their per-rank partitioning and allocation policy must
-  // agree.  A caller must also verify X's domain Map independently.
+  // Cheap, constant-time release-mode dispatch check.  Correct Tpetra
+  // domain/X Map usage guarantees the same local element count *on every
+  // rank*.  Given that invariant and the same allocation alignment, the
+  // VmmLayout prefix offsets are deterministic.  Compare the remaining
+  // physical policy, local prefix, and extent without walking per-rank arrays.
+  // This is not a substitute for Map equality or an exhaustive layout check
+  // on invalid caller inputs; those belong in CrsMatrix debug validation.
+  bool isCompatibleApplyLayout(const VmmLayout<impl_scalar_type>& other) const {
+    return layout_.rank() == other.rank() &&
+           layout_.size() == other.size() &&
+           layout_.device() == other.device() &&
+           layout_.ipcMode() == other.ipcMode() &&
+           layout_.granularity() == other.granularity() &&
+           layout_.allocationAlignment() == other.allocationAlignment() &&
+           layout_.logicalLocalCount() == other.logicalLocalCount() &&
+           layout_.localBytes() == other.localBytes() &&
+           layout_.baseElements()[layout_.rank()] ==
+               other.baseElements()[other.rank()] &&
+           layout_.totalBytes() == other.totalBytes() &&
+           layout_.totalElements() == other.totalElements();
+  }
+
+  // Exhaustive diagnostic comparison.  Numeric CUDA virtual base addresses
+  // may differ between independently allocated arenas and are intentionally
+  // excluded.  Only the debug path should call this O(number of ranks) check.
   bool isCompatibleLayout(const VmmLayout<impl_scalar_type>& other) const {
     return layout_.rank() == other.rank() &&
            layout_.size() == other.size() &&
@@ -154,8 +176,8 @@ class VmmSpmvContext {
   }
 
   // This context owns no CUDA vector allocation or virtual mappings.  X must
-  // refer to a compatible peer-mapped arena.  Synchronization of producers
-  // and readers is handled by CrsMatrix::tryApplyVmm before/after this call.
+  // refer to a compatible peer-mapped arena.  Producer/consumer synchronization
+  // is deliberately external to this asynchronous SpMV implementation.
   const VmmLayout<impl_scalar_type>& layout() const { return layout_; }
   bool uses64BitCrsOrdinals() const { return static_cast<bool>(crs64_); }
 

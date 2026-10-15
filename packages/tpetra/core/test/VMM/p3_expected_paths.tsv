@@ -1,4 +1,4 @@
-# baseline = historical M4.1; allocation_only = M5.1; matrix_generalized = M5.2; generalized = M5.4 target
+# baseline = historical M4.1; allocation_only = M5.1; matrix_generalized = M5.2/M5.3; generalized = M5.4
 # Values apply when TPETRA_EXPERIMENTAL_VMM=1 and TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=1.
 # All modes remain test-only expectations and do not change Tpetra execution.
 case	baseline_X_storage	baseline_Y_storage	baseline_apply	allocation_only_X_storage	allocation_only_Y_storage	allocation_only_apply	matrix_generalized_X_storage	matrix_generalized_Y_storage	matrix_generalized_apply	generalized_X_storage	generalized_Y_storage	generalized_apply
@@ -7,5 +7,6 @@ G02_PermutedLocalGids	standard	standard	classic	vmm	vmm	classic	vmm	vmm	vmm	vmm	
 G03_XDistinct	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	vmm
 G03_YDistinct	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	vmm
 G03_BothDistinct	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	vmm
+G03_DistinctPermuted	standard	standard	classic	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	vmm
 G04_OverlappingMV	standard	N/A	N/A	vmm	N/A	N/A	vmm	N/A	N/A	vmm	N/A	N/A
 G05_NonOneToOneDomain	standard	vmm	classic	vmm	vmm	classic	vmm	vmm	classic	vmm	vmm	classic

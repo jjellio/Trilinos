@@ -149,7 +149,7 @@ def main():
     parser.add_argument("--native", choices=(0, 1), type=int, required=True)
     parser.add_argument("--stats", choices=(0, 1), type=int, required=True)
     parser.add_argument("--mode", choices=("baseline", "allocation_only", "matrix_generalized", "generalized"),
-                        default="matrix_generalized")
+                        default="generalized")
     parser.add_argument("--np", type=int, default=2)
     args = parser.parse_args()
     if args.np != 2:

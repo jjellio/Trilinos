@@ -1,12 +1,15 @@
 # P4 — Debug Map diagnostics, boundary distributions, timed-path checks
 
 P4 is an in-tree regression group in the existing TpetraCore executable.
-M5.3 extends its debug-only tests to validate the VMM Map contract. It requires the **corrected P3 installation** (test-only environment
+M5.3 extended its debug-only tests to validate the VMM Map contract. M5.4
+retains those diagnostics while allowing equivalent distinct Maps to dispatch
+directly in both debug and release modes. It requires the **corrected P3 installation** (test-only environment
 variable `VMM_TEST_MAP_MODE`, not the reserved `TPETRA_VMM_TEST_MAP_MODE`).
 
-M5.3 changes only `Tpetra_CrsMatrix_def.hpp` in the production library.
-No `MultiVector`, `Behavior`, VMM allocator, matrix addressing, or release-mode
-dispatch predicates change. As in P0–P3, caller-side fences and communicator barriers in test
+M5.4 modifies the release dispatch in `Tpetra_CrsMatrix_def.hpp` and adds a
+constant-time physical-layout check in `Tpetra_Details_VmmSpmvContext.hpp`.
+The M5.3 debug guard, `MultiVector`, `Behavior`, allocator, and matrix-address
+translation are unchanged. As in P0–P3, caller-side fences and communicator barriers in test
 fixtures are deliberate; ordinary `apply()` remains asynchronous. A separate
 explicit **diagnostic** test uses existing `TPETRA_SYNCHRONIZE_APPLY=1` to
 check timer invocation counts, not runtime performance.
@@ -20,12 +23,12 @@ check timer invocation counts, not runtime performance.
 | `VMM_Boundary` B03 | Rank 0 owns 1 GID, rank 1 owns 7 | Remote X access, unequal logical sizes, native VMM and direct path when enabled |
 | `VMM_Debug` G06a | Wrong X domain Map of the same local length, matrix with Importer | In native-VMM debug, CrsMatrix reports `domain-X Map mismatch` before dispatch; classic-only retains DistObject source-Map diagnostic |
 | `VMM_Debug` G06b | Wrong Y range Map of the same local length, matrix with Exporter | With `TPETRA_DEBUG=1`, `DistObject` throws *target Map* diagnostic before MPI transfer |
-| `VMM_Debug` G06c | X Map has a different RCP identity but `isSameAs()` | Valid classical Import works under debug; preserves P3's baseline/future distinction for direct VMM eligibility |
+| `VMM_Debug` G06c | X Map has a different RCP identity but `isSameAs()` | Valid Map accepted under debug; direct VMM dispatch in native mode at M5.4 |
 | `VMM_Debug` G07a | Wrong X Map, diagonal matrix with **no Importer** | Native-VMM debug catches domain-X mismatch before the otherwise unchecked classical local SpMV |
 | `VMM_Debug` G07b | Wrong Y Map, diagonal matrix with **no Exporter** | Native-VMM debug catches range-Y mismatch before an otherwise unchecked local output kernel |
 | `VMM_Debug` G07c | Same per-rank counts and GID set, different local GID order | Semantic Map check detects reordered LIDs rather than mistaking identical physical layout for Map equality |
 | `VMM_Debug` G07d | Only rank 1 has a wrong X Map; rank 0 uses the matrix's exact Map object | All ranks reject without `isSameAs()` taking a rank-divergent collective path |
-| `VMM_Debug` G07e | Distinct but equivalent X/Y Maps, no Importer or Exporter | Debug accepts valid Map semantics; classic dispatch remains until M5.4 |
+| `VMM_Debug` G07e | Distinct but equivalent X/Y Maps, no Importer or Exporter | Debug accepts valid Map semantics; direct VMM dispatch in native mode at M5.4 |
 | `VMM_Debug` G07f | Rank 0 has equivalent uniform X Map; rank 1 has a different explicit X Map | All ranks reject despite different Map::isSameAs() early-return behaviors |
 | `VMM_Timer` T01 | Balanced 4/4, all-remote CRS | With opt-in synchronized instrumentation, direct or classic named Teuchos timer increments by exactly one on each rank; analytical result correct |
 | `VMM_FabricProbe` F01 | Both GPU ranks, driver-only capability query | Fabric allocation probe succeeds or clearly reports unsupported, without production VMM abort |
@@ -42,8 +45,8 @@ Neither Map comparison nor synchronization occurs in normal release SpMV.
 
 ## CMake / CTest
 
-Apply `M5_3_debug_map_validation.patch` at the Trilinos repository root
-**after M5.2**. Existing P4 CTest registrations are unchanged, but the debug
+Apply `M5_4_dispatch_cleanup.patch` at the Trilinos repository root
+**after the validated M5.3 implementation**. Existing P4 CTest registrations are unchanged, but the debug
 Teuchos group now contains nine cases; rebuild the regression executable.
 Continue using `Tpetra_ENABLE_VMM_TESTS=ON` and your existing
 `MPI_EXEC_PRE_NUMPROCS_FLAGS` / `MPI_EXEC_POST_NUMPROCS_FLAGS` GPU-binding
@@ -78,11 +81,10 @@ permissions; the arena currently aborts the MPI job if CUDA driver mapping
 calls fail. The capability probe itself is always safe to run.
 
 `VMM_TEST_MAP_MODE=baseline|allocation_only|matrix_generalized|generalized`
-is the P3 test-only switch, propagated into P4. For **M5.3**, use
-`matrix_generalized` as the default. Equivalent-but-distinct Maps are still
-valid but take classical SpMV until M5.4. No new `TPETRA_` environment variable
-is introduced. `generalized` is a future
-acceptance target, not a feature-enabling flag.
+is the P3 test-only switch, propagated into P4. For **M5.4**, use
+`generalized` as the default. Equivalent-but-distinct Maps are valid and take
+direct VMM SpMV when native VMM is enabled. No new `TPETRA_` environment
+variable is introduced. The test profile selects expectations, never features.
 
 ## Full standalone sweep
 
@@ -90,7 +92,7 @@ acceptance target, not a feature-enabling flag.
 ~/cronus/trilinos/packages/tpetra/core/test/VMM/run_vmm_p4_tests.sh \
   --exe ./packages/tpetra/core/test/VMM/TpetraCore_VmmRegression.exe \
   --gpu-bind "$HOME/cronus/gpu_bind.sh" \
-  --outdir ./vmm-p4-results --full --mode matrix_generalized
+  --outdir ./vmm-p4-results --full --mode generalized
 ```
 
 The script launches eight independent `mpirun --bind-to none -np 2` jobs,
@@ -119,5 +121,5 @@ Tpetra `Behavior` settings.
   benchmark and does not assert any elapsed-time threshold.
 - Unsupported Fabric is a capability result, not a regression.
 
-P4 now also serves as the M5.3 semantic-debug acceptance suite for NP=2. The separate P5
+P4 also serves as the M5.3/M5.4 semantic-debug acceptance suite for NP=2. The separate P5
 milestone can extend the suite to 4/8 GPUs and reporting/CI workflows.
