@@ -1,11 +1,12 @@
 # P4 — Debug Map diagnostics, boundary distributions, timed-path checks
 
-P4 is **test-only** and builds in the existing TpetraCore regression executable
-from P0–P3. It requires the **corrected P3 installation** (test-only environment
+P4 is an in-tree regression group in the existing TpetraCore executable.
+M5.3 extends its debug-only tests to validate the VMM Map contract. It requires the **corrected P3 installation** (test-only environment
 variable `VMM_TEST_MAP_MODE`, not the reserved `TPETRA_VMM_TEST_MAP_MODE`).
 
-No production `CrsMatrix`, `MultiVector`, `Behavior`, or VMM-allocator files
-change. As in P0–P3, caller-side fences and communicator barriers in test
+M5.3 changes only `Tpetra_CrsMatrix_def.hpp` in the production library.
+No `MultiVector`, `Behavior`, VMM allocator, matrix addressing, or release-mode
+dispatch predicates change. As in P0–P3, caller-side fences and communicator barriers in test
 fixtures are deliberate; ordinary `apply()` remains asynchronous. A separate
 explicit **diagnostic** test uses existing `TPETRA_SYNCHRONIZE_APPLY=1` to
 check timer invocation counts, not runtime performance.
@@ -17,21 +18,33 @@ check timer invocation counts, not runtime performance.
 | `VMM_Boundary` B01 | Rank 0 has all 8 GIDs, rank 1 has 0 | Nonzero padded VMM allocation on zero-local-entry rank, storage/content |
 | `VMM_Boundary` B02 | Same 8/0 rank distribution, diagonal A | Numerical result, rank agreement on VMM versus classic dispatch (no fixed requirement that the empty-rank configuration take direct VMM) |
 | `VMM_Boundary` B03 | Rank 0 owns 1 GID, rank 1 owns 7 | Remote X access, unequal logical sizes, native VMM and direct path when enabled |
-| `VMM_Debug` G06a | Wrong X domain Map of the same local length, matrix with Importer | With `TPETRA_DEBUG=1`, `DistObject` throws *source Map* diagnostic before MPI transfer |
+| `VMM_Debug` G06a | Wrong X domain Map of the same local length, matrix with Importer | In native-VMM debug, CrsMatrix reports `domain-X Map mismatch` before dispatch; classic-only retains DistObject source-Map diagnostic |
 | `VMM_Debug` G06b | Wrong Y range Map of the same local length, matrix with Exporter | With `TPETRA_DEBUG=1`, `DistObject` throws *target Map* diagnostic before MPI transfer |
 | `VMM_Debug` G06c | X Map has a different RCP identity but `isSameAs()` | Valid classical Import works under debug; preserves P3's baseline/future distinction for direct VMM eligibility |
+| `VMM_Debug` G07a | Wrong X Map, diagonal matrix with **no Importer** | Native-VMM debug catches domain-X mismatch before the otherwise unchecked classical local SpMV |
+| `VMM_Debug` G07b | Wrong Y Map, diagonal matrix with **no Exporter** | Native-VMM debug catches range-Y mismatch before an otherwise unchecked local output kernel |
+| `VMM_Debug` G07c | Same per-rank counts and GID set, different local GID order | Semantic Map check detects reordered LIDs rather than mistaking identical physical layout for Map equality |
+| `VMM_Debug` G07d | Only rank 1 has a wrong X Map; rank 0 uses the matrix's exact Map object | All ranks reject without `isSameAs()` taking a rank-divergent collective path |
+| `VMM_Debug` G07e | Distinct but equivalent X/Y Maps, no Importer or Exporter | Debug accepts valid Map semantics; classic dispatch remains until M5.4 |
+| `VMM_Debug` G07f | Rank 0 has equivalent uniform X Map; rank 1 has a different explicit X Map | All ranks reject despite different Map::isSameAs() early-return behaviors |
 | `VMM_Timer` T01 | Balanced 4/4, all-remote CRS | With opt-in synchronized instrumentation, direct or classic named Teuchos timer increments by exactly one on each rank; analytical result correct |
 | `VMM_FabricProbe` F01 | Both GPU ranks, driver-only capability query | Fabric allocation probe succeeds or clearly reports unsupported, without production VMM abort |
 
-The G06 tests deliberately use **nontrivial Importer/Exporter paths**, because
-classic `CrsMatrix::apply()` does not guarantee full Map checking without
-communication. All ranks use the same invalid fixture. These are *debug-only*
-negative tests; never run them with `TPETRA_DEBUG=0`.
+The G06 tests retain classic Importer/Exporter diagnostics. G07 invalid-Map
+fixtures exercise the cases classic local SpMV may not reject: under VMM native
+and `TPETRA_DEBUG=1`, M5.3 checks domain/X and range/Y semantic equivalence
+**before the direct kernel**. Classic-only G07 negative operations are
+intentionally not executed; they emit `debugSkipped ...
+reason=direct_vmm_unavailable`. G07e is a positive, numerical test in both
+configurations. The debug guard runs on all ranks, handles mixed Map object
+identity, and throws uniform diagnostics only after completing collectives.
+Neither Map comparison nor synchronization occurs in normal release SpMV.
 
 ## CMake / CTest
 
-After applying `vmm-tpetra-P4.patch` at the Trilinos repository root,
-**reconfigure CMake** to register the additional source files and tests.
+Apply `M5_3_debug_map_validation.patch` at the Trilinos repository root
+**after M5.2**. Existing P4 CTest registrations are unchanged, but the debug
+Teuchos group now contains nine cases; rebuild the regression executable.
 Continue using `Tpetra_ENABLE_VMM_TESTS=ON` and your existing
 `MPI_EXEC_PRE_NUMPROCS_FLAGS` / `MPI_EXEC_POST_NUMPROCS_FLAGS` GPU-binding
 configuration. The tests use a dedicated `-np 2` MPI launcher.
@@ -64,11 +77,12 @@ that only after confirming the machine has Fabric VMM handle support and IPC
 permissions; the arena currently aborts the MPI job if CUDA driver mapping
 calls fail. The capability probe itself is always safe to run.
 
-`VMM_TEST_MAP_MODE=baseline|allocation_only|generalized` is the test-only
-expectation switch from P3, propagated into the P4 debug-equivalence test.
-`allocation_only` is the M5.1 default; P4's expected debug SpMV path is the
-same as the historical baseline until M5.4 removes Map-pointer checks.
-`generalized` remains a future acceptance target, not a feature-enabling flag.
+`VMM_TEST_MAP_MODE=baseline|allocation_only|matrix_generalized|generalized`
+is the P3 test-only switch, propagated into P4. For **M5.3**, use
+`matrix_generalized` as the default. Equivalent-but-distinct Maps are still
+valid but take classical SpMV until M5.4. No new `TPETRA_` environment variable
+is introduced. `generalized` is a future
+acceptance target, not a feature-enabling flag.
 
 ## Full standalone sweep
 
@@ -76,7 +90,7 @@ same as the historical baseline until M5.4 removes Map-pointer checks.
 ~/cronus/trilinos/packages/tpetra/core/test/VMM/run_vmm_p4_tests.sh \
   --exe ./packages/tpetra/core/test/VMM/TpetraCore_VmmRegression.exe \
   --gpu-bind "$HOME/cronus/gpu_bind.sh" \
-  --outdir ./vmm-p4-results --full --mode allocation_only
+  --outdir ./vmm-p4-results --full --mode matrix_generalized
 ```
 
 The script launches eight independent `mpirun --bind-to none -np 2` jobs,
@@ -98,11 +112,12 @@ Tpetra `Behavior` settings.
   edge case, not necessarily a Map identity problem.
 - B03 failure with valid native allocation signals incorrect padded-offset or
   cross-owner addressing.
-- G06a/G06b should fail their test **if the expected debug exception did not
-  occur**; a caught and validated exception means the test passes.
+- G06/G07 invalid-map tests must catch the **specific** CrsMatrix or
+  DistObject diagnostic appropriate to that configuration; any other
+  exception or no exception is a test failure.
 - T01 checks `Teuchos::Time::numCalls()` deltas. It is not a performance
   benchmark and does not assert any elapsed-time threshold.
 - Unsupported Fabric is a capability result, not a regression.
 
-P4 is designed to finish pre-refactor NP=2 test coverage. The separate P5
+P4 now also serves as the M5.3 semantic-debug acceptance suite for NP=2. The separate P5
 milestone can extend the suite to 4/8 GPUs and reporting/CI workflows.

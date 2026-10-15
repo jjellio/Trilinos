@@ -5,8 +5,8 @@
 // ****************************************************************************
 // @HEADER
 // P3 G01-G05: VMM Map contracts across development milestones.
-// "allocation_only" tests M5.1 storage behavior with unchanged matrix
-// addressing and dispatch; "generalized" remains the future target.
+// "matrix_generalized" tests M5.2 column addressing, while distinct
+// Map-object dispatch remains classic until M5.4 ("generalized").
 
 #include "VmmP3Helpers.hpp"
 
@@ -19,10 +19,10 @@ TEUCHOS_UNIT_TEST(VMM_Map, G01_Interleaved) {
   TEST_ASSERT(!map->isContiguous());
   TEST_ASSERT(map->isOneToOne());
 
-  const bool generalized = expectGeneralizedMaps();
+  const bool matrixGeneralized = expectMatrixGeneralized();
   const auto A = makeAndCheckMatrix(
       [&]() { return makeNeighborMatrix(map, "P3_G01_Interleaved"); },
-      "P3_G01_Interleaved", generalized ? "" : "map_not_contiguous",
+      "P3_G01_Interleaved", matrixGeneralized ? "" : "map_not_contiguous",
       out, success);
   vector_type X(map, 1), Y(map, 1);
   checkStorage(X, nativeExpected() && expectGeneralizedMvAllocation(),
@@ -30,7 +30,7 @@ TEUCHOS_UNIT_TEST(VMM_Map, G01_Interleaved) {
   checkStorage(Y, nativeExpected() && expectGeneralizedMvAllocation(),
                "G01 Y", out, success);
   prepareX(X);
-  executeAndCheck(*A, X, Y, standardOrVmmPath(generalized),
+  executeAndCheck(*A, X, Y, standardOrVmmPath(matrixGeneralized),
                   "P3_G01_Interleaved", false, out, success);
 }
 
@@ -43,10 +43,10 @@ TEUCHOS_UNIT_TEST(VMM_Map, G02_PermutedLocalGids) {
   TEST_ASSERT(!map->isContiguous());
   TEST_ASSERT(map->isOneToOne());
 
-  const bool generalized = expectGeneralizedMaps();
+  const bool matrixGeneralized = expectMatrixGeneralized();
   const auto A = makeAndCheckMatrix(
       [&]() { return makeNeighborMatrix(map, "P3_G02_Permuted"); },
-      "P3_G02_Permuted", generalized ? "" : "map_not_contiguous",
+      "P3_G02_Permuted", matrixGeneralized ? "" : "map_not_contiguous",
       out, success);
   vector_type X(map, 1), Y(map, 1);
   checkStorage(X, nativeExpected() && expectGeneralizedMvAllocation(),
@@ -54,7 +54,7 @@ TEUCHOS_UNIT_TEST(VMM_Map, G02_PermutedLocalGids) {
   checkStorage(Y, nativeExpected() && expectGeneralizedMvAllocation(),
                "G02 Y", out, success);
   prepareX(X);
-  executeAndCheck(*A, X, Y, standardOrVmmPath(generalized),
+  executeAndCheck(*A, X, Y, standardOrVmmPath(matrixGeneralized),
                   "P3_G02_Permuted", false, out, success);
 }
 
@@ -131,11 +131,11 @@ TEUCHOS_UNIT_TEST(VMM_Map, G05_NonOneToOneDomain) {
   // elements available locally. This isolates the matrix eligibility rule.
   // A one-to-one domain is an intended VMM *addressing* requirement, not a
   // MultiVector allocation requirement (compare G04).
-  const bool generalized = expectGeneralizedMaps();
+  const bool matrixGeneralized = expectMatrixGeneralized();
   const auto A = makeAndCheckMatrix(
       [&]() { return makeDiagonalWithDomain(row, domain, "P3_G05_NonOneToOneDomain"); },
       "P3_G05_NonOneToOneDomain",
-      generalized ? "domain_map_not_one_to_one" : "map_not_contiguous",
+      matrixGeneralized ? "domain_map_not_one_to_one" : "map_not_contiguous",
       out, success);
   vector_type X(domain, 1), Y(row, 1);
   checkStorage(X, nativeExpected() && expectGeneralizedMvAllocation(),

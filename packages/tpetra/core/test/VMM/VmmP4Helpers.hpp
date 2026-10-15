@@ -37,6 +37,18 @@ inline scalar_type neighborExpected(go_type gid) {
 // The test intentionally compares real exception content, not just whether
 // something threw.  No MPI operations occur until all ranks have returned
 // from the (uniformly invalid) operation under test.
+// The additional negative fixtures deliberately exercise invalid Maps that
+// classic local SpMV need not reject.  Never execute them as classic-only
+// applies: with no Importer/Exporter they could silently compute the wrong
+// answer.  Each rank emits an auditable skip marker instead.
+inline bool requireDirectVmmDebug(const std::string& name) {
+  if (nativeExpected()) return true;
+  const int rank = Tpetra::getDefaultComm()->getRank();
+  std::cout << "[VMM_P4] event=debugSkipped case=" << name
+            << " rank=" << rank << " reason=direct_vmm_unavailable\n" << std::flush;
+  return false;
+}
+
 inline void checkDebugException(const std::string& message,
                                 const std::string& requiredText,
                                 const std::string& name,

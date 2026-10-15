@@ -13,6 +13,8 @@
 #include "Tpetra_CrsMatrix_fwd.hpp"
 #include "Tpetra_DistObject_fwd.hpp"
 #include "Tpetra_MultiVector.hpp"
+#include "Teuchos_Array.hpp"
+#include "Teuchos_CommHelpers.hpp"
 #include "KokkosSparse_CrsMatrix.hpp"
 #include "KokkosSparse_spmv.hpp"
 #include <algorithm>
@@ -23,6 +25,7 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -248,52 +251,55 @@ class VmmSpmvContext {
     auto domainMap = A.getDomainMap();
     auto colMap = A.getColMap();
 
-    if (!domainMap->isContiguous()) {
-      throw std::runtime_error(
-          "VMM prototype requires a contiguous Tpetra domain Map");
-    }
+    // Resolve each column GID to its domain owner and that owner's LID.
+    // Unlike numeric GID intervals, Tpetra's Directory preserves arbitrary
+    // domain distributions and rank-local GID permutations.  The lookup is
+    // collective even for ranks with zero column entries.  All communication
+    // happens at fillComplete, never in the direct SpMV apply path.
+    const auto colGids = colMap->getLocalElementList();
+    const std::size_t numColLids = colGids.size();
+    Teuchos::Array<int> owners(numColLids, -1);
+    Teuchos::Array<LO> ownerLids(numColLids, static_cast<LO>(-1));
+    const Tpetra::LookupStatus lookupStatus =
+        domainMap->getRemoteIndexList(colGids, owners(), ownerLids());
 
-    // Rank counts and padded offsets are already in VmmLayout.  Gather
-    // only the first GID of each rank's domain segment to resolve
-    // column-Map GIDs to owner/local pairs.
-    const std::size_t myCount = domainMap->getLocalNumElements();
-    auto myGids = domainMap->getLocalElementList();
-    long long myFirst = 0;
-    if (myCount != 0) myFirst = static_cast<long long>(myGids[0]);
-    std::vector<long long> firstGid(size_);
-#ifdef HAVE_MPI
-    MPI_Allgather(&myFirst, 1, MPI_LONG_LONG,
-                  firstGid.data(), 1, MPI_LONG_LONG, comm_.mpi());
-#else
-    firstGid[0] = myFirst;
-#endif
-
+    // An invalid directory result must never reach VmmLayout::globalIndex,
+    // which aborts on out-of-bounds indices.  Agree on errors *before* any
+    // rank can throw or enter later collective statistics analysis.
     const auto& counts = layout_.logicalCounts();
-    const std::size_t numColLids = colMap->getLocalNumElements();
-    std::vector<std::uint64_t> colLidToVmm(numColLids);
-    auto colGids = colMap->getLocalElementList();
-
-    for (std::size_t lid = 0; lid < numColLids; ++lid) {
-      const long long gid = static_cast<long long>(colGids[lid]);
-      int owner = -1;
-      std::uint64_t ownerLocal = 0;
-      for (int p = 0; p < size_; ++p) {
-        if (counts[p] == 0 || gid < firstGid[p]) continue;
-        // Compare unsigned offsets rather than adding counts to a signed
-        // GID; the latter could overflow for a large contiguous domain.
-        const auto offset = static_cast<std::uint64_t>(gid) -
-                            static_cast<std::uint64_t>(firstGid[p]);
-        if (offset < counts[p]) {
-          owner = p;
-          ownerLocal = offset;
+    int localLookupError = lookupStatus == Tpetra::AllIDsPresent ? 0 : 1;
+    if (localLookupError == 0) {
+      for (std::size_t lid = 0; lid < numColLids; ++lid) {
+        const int owner = owners[lid];
+        if (owner < 0 || owner >= size_) {
+          localLookupError = 2;
+          break;
+        }
+        const LO ownerLid = ownerLids[lid];
+        if (ownerLid < 0 || static_cast<std::uint64_t>(ownerLid) >= counts[owner]) {
+          localLookupError = 3;
           break;
         }
       }
-      if (owner < 0) {
-        throw std::runtime_error(
-            "Failed to resolve a column-map GID to a domain-map owner");
-      }
-      colLidToVmm[lid] = layout_.globalIndex(owner, ownerLocal);
+    }
+    int globalLookupError = 0;
+    Teuchos::reduceAll<int, int>(*comm_.comm, Teuchos::REDUCE_MAX,
+                                 localLookupError, Teuchos::outArg(globalLookupError));
+    if (globalLookupError != 0) {
+      const char* reason = globalLookupError == 1
+                           ? "column GID not found in domain Map"
+                           : globalLookupError == 2
+                           ? "invalid owner rank for column GID"
+                           : "invalid owner-local index for column GID";
+      throw std::runtime_error(std::string("VMM CRS address translation: ") + reason);
+    }
+
+    // The column Map's LID order is exactly the order referenced by the
+    // original local CRS.  Translate once into padded global VMM indices.
+    std::vector<std::uint64_t> colLidToVmm(numColLids);
+    for (std::size_t lid = 0; lid < numColLids; ++lid) {
+      colLidToVmm[lid] = layout_.globalIndex(
+          owners[lid], static_cast<std::uint64_t>(ownerLids[lid]));
     }
 
     // Acquire Tpetra's managed views only within this function.  Our

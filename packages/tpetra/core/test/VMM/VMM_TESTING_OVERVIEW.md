@@ -25,7 +25,7 @@ Tests live inside Trilinos, using **Teuchos unit tests**, the **TriBITS/CTest** 
 | **P1 — SpMV correctness** | Diagonal, boundary-crossing, all-remote and stencil matrices; `alpha`/`beta` combinations | Numerical semantics and proof of direct VMM versus classical dispatch on **both** ranks |
 | **P2 — MultiVector and fallback** | Allocation policy; multicolumn fallback; shallow/deep copies and views; host/device coherence; allocation lifetime; Exporter, replicated-output and transpose cases | Storage ownership, host/device correctness, and preserved classical behavior when VMM is ineligible |
 | **P3 — Map contracts** | Interleaved and locally permuted GIDs; equivalent-but-distinct Map objects; overlapping ownership; non-one-to-one domain Map | A measurable **pre-refactor baseline** and a separate **post-refactor acceptance target** for generalized Maps |
-| **P4 — Debug and boundaries** | Zero-local-row and skewed partitions; invalid X/Y Map diagnostics; timer counters; optional Fabric probe | Empty partitions, rank-consistent selection, existing debug behavior, and diagnostic observability |
+| **P4 — Debug and boundaries** | Zero-local-row and skewed partitions; invalid X/Y Map diagnostics; timer counters; optional Fabric probe | Empty partitions, rank-consistent selection, existing DistObject diagnostics, M5.3 VMM Map semantic checks, and diagnostic observability |
 
 The milestone-specific documents are the source of detail: [P1](P1_README.md), [P2](P2_README.md), [P3](P3_README.md), and [P4](P4_README.md). The directory's [README](README.md) describes the P0 harness. P3 also carries `p3_expected_paths.tsv` for present-versus-future expectations. The C++ test sources provide the definitive fixtures and assertions.
 
@@ -72,8 +72,8 @@ TESTS=/path/to/trilinos/packages/tpetra/core/test/VMM
 "$TESTS/run_vmm_tests.sh"    --exe "$EXE" --full --outdir ./vmm-p0-results
 "$TESTS/run_vmm_p1_tests.sh" --exe "$EXE" --full --outdir ./vmm-p1-results
 "$TESTS/run_vmm_p2_tests.sh" --exe "$EXE" --full --outdir ./vmm-p2-results
-"$TESTS/run_vmm_p3_tests.sh" --exe "$EXE" --full --outdir ./vmm-p3-results --mode allocation_only
-"$TESTS/run_vmm_p4_tests.sh" --exe "$EXE" --full --outdir ./vmm-p4-results --mode allocation_only
+"$TESTS/run_vmm_p3_tests.sh" --exe "$EXE" --full --outdir ./vmm-p3-results --mode matrix_generalized
+"$TESTS/run_vmm_p4_tests.sh" --exe "$EXE" --full --outdir ./vmm-p4-results --mode matrix_generalized
 ```
 
 The runners default to the site's `~/cronus/gpu_bind.sh`; supply `--gpu-bind /path/to/wrapper` if different. Each creates an environment-specific log and a machine-readable `results.tsv`; timeouts, failed numerical assertions, incorrect path events, and unexpected job exits are failures. See each runner's `--help` for available filters.
@@ -86,9 +86,9 @@ The runners default to the site's `~/cronus/gpu_bind.sh`; supply `--gpu-bind /pa
 | `TPETRA_EXPERIMENTAL_VMM_NATIVE_MV` | Enables/disables native VMM-backed MultiVector allocation |
 | `TPETRA_EXPERIMENTAL_VMM_IPC=posix` | Standard tested cross-process memory-sharing mechanism |
 | `TPETRA_EXPERIMENTAL_VMM_STATISTICS=1` | Enables allocation, skip-reason and `event=apply` diagnostic records; `0` suppresses them |
-| `TPETRA_DEBUG=1` | Used only for dedicated debug tests that expect Tpetra Map-validation exceptions |
+| `TPETRA_DEBUG=1` | Dedicated P4 debug tests validate both existing DistObject diagnostics and new M5.3 CrsMatrix VMM Map semantics; ordinary runs remain debug off |
 | `TPETRA_SYNCHRONIZE_APPLY=1` | Used only in explicit P4 timer diagnostics; ordinary correctness configurations use `0` |
-| `VMM_TEST_MAP_MODE=baseline\|allocation_only\|generalized` | **Test-only** expectations for historical M4.1 / M5.1 / final M5; not a production VMM switch |
+| `VMM_TEST_MAP_MODE=baseline\|allocation_only\|matrix_generalized\|generalized` | **Test-only** expectations for M4.1 / M5.1 / M5.2 / final M5.4; not a production VMM switch |
 
 **Environment namespace:** `Tpetra::Details::Behavior` rejects unrecognized environment variables prefixed `TPETRA_` or `Tpetra_`. Test-only controls must avoid those prefixes. In particular, use `VMM_TEST_MAP_MODE`, **not** the obsolete `TPETRA_VMM_TEST_MAP_MODE`. The CMake cache setting `Tpetra_VMM_P3_MAP_MODE` is distinct from a process environment variable.
 
@@ -96,7 +96,7 @@ Selected statistics-enabled records look like:
 
 ```text
 [TPETRA_MV] event=allocate ... storage=vmm
-[TPETRA_MATRIX] event=vmmSkip ... reason=map_not_contiguous
+[TPETRA_MATRIX] event=vmmSkip ... reason=domain_map_not_one_to_one
 [TPETRA_MATRIX] event=apply path=vmm rank=0 label="P1_S03_AllRemote"
 [TPETRA_MATRIX] event=apply path=classic rank=1 label="P2_F03_Exporter"
 [TPETRA_MATRIX] event=apply path=alpha_zero rank=0 label="P1_S06_AlphaBeta"
@@ -118,13 +118,13 @@ The following results were reviewed from the supplied two-GPU run archives on **
 
 The P4 Fabric capability probe reported `supported=0` on both ranks (`reason=fabric_allocation`). The development node lacks the required IMEX/Fabric capability; the optional Fabric IPC execution was therefore correctly **skipped**, not counted as a VMM correctness failure. The validated path on this system is **POSIX IPC**.
 
-This is a focused **NP=2, two-GPU prototype baseline**. It establishes correctness and dispatch behavior for the exercised fixtures, not comprehensive production qualification, performance scaling, or 4/8-GPU coverage. A successful P3 baseline run does **not** mean generalized noncontiguous Maps are supported yet.
+This is a focused **NP=2, two-GPU prototype baseline**. It establishes correctness and dispatch behavior for the exercised fixtures, not comprehensive production qualification, performance scaling, or 4/8-GPU coverage. M5.2 passed the user's full 32/32 CTest suite on the two-GPU POSIX node. M5.3 adds debug-only semantic checks to noncontiguous, one-to-one matrix addressing, pending validation on the two-GPU node.
 
 ## Using the suite during the Map/eligibility refactor
 
 1. **Keep P1, P2, and P4 green.** These protect the numerical kernel, MultiVector ownership, fallback routes, and debug/boundary semantics as implementation details change. P0 continues to protect the harness and launcher.
-2. **Use P3 `allocation_only` for M5.1.** Noncontiguous and overlapping Maps now allocate VMM storage when native VMM is enabled, but unchanged matrix indexing and Map-pointer dispatch keep G01/G02/G03/G05 on classical SpMV. The previous `baseline` remains a historical M4.1 oracle and intentionally fails M5.1 native-allocation checks.
-3. **Switch P3 to `generalized` only after M5.2–M5.4.** This final acceptance specification is not an enable flag. It expects direct VMM for eligible noncontiguous, one-to-one Maps and equivalent-but-distinct Map objects; matrix addressing still rejects ambiguous non-one-to-one domain Maps. Mathematical answers must not change.
+2. **Use P3 `matrix_generalized` for M5.2.** G01/G02 have native VMM storage and now execute direct VMM SpMV through directory-derived owner/local indices; G03 still uses classic SpMV because it passes distinct Map objects; G05 has an ambiguous domain Map and remains classical. The historical `baseline` and `allocation_only` modes are retained for earlier code revisions and intentionally differ from M5.2.
+3. **Reserve P3 `generalized` for M5.4.** This final acceptance specification is not an enable flag. It additionally expects direct VMM for equivalent-but-distinct Map objects after debug validation and pointer-check cleanup; ambiguous non-one-to-one domain Maps remain a classical fallback.
 4. **Investigate failures in layers:** GPU binding → object allocation (`storage=vmm` or skip reason) → matrix VMM context → rank-local `event=apply` → analytic numerical result. Do not interpret an allocator success as proof of kernel dispatch.
 5. **Preserve asynchronous semantics.** New compatibility checks should follow the agreed Tpetra debug contract where appropriate; tests should not force collectives or expensive Map comparisons into normal `CrsMatrix::apply()`.
 

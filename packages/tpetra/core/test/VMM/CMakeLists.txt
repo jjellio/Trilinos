@@ -83,15 +83,18 @@ TPETRA_VMM_REGISTER_P2_GROUP(MultiVector VMM_MultiVector)
 TPETRA_VMM_REGISTER_P2_GROUP(Fallback VMM_Fallback)
 
 # P3 Map-generalization *test* mode.  This is not a production VMM flag.
-# M5.1 relaxes MV storage eligibility but leaves matrix indexing and apply
-# unchanged.  Reconfigure a cached build with -DTpetra_VMM_P3_MAP_MODE=allocation_only.
-SET(Tpetra_VMM_P3_MAP_MODE "allocation_only" CACHE STRING
-    "VMM P3 Map test mode: baseline, allocation_only, or generalized")
-SET_PROPERTY(CACHE Tpetra_VMM_P3_MAP_MODE PROPERTY STRINGS baseline allocation_only generalized)
+# M5.2 supports noncontiguous one-to-one matrix domain Maps, but the
+# apply Map-pointer identity checks remain until M5.4.  Explicitly reset
+# cached CMake values with -DTpetra_VMM_P3_MAP_MODE=matrix_generalized.
+SET(Tpetra_VMM_P3_MAP_MODE "matrix_generalized" CACHE STRING
+    "VMM P3 Map test mode: baseline, allocation_only, matrix_generalized, or generalized")
+SET_PROPERTY(CACHE Tpetra_VMM_P3_MAP_MODE PROPERTY STRINGS
+    baseline allocation_only matrix_generalized generalized)
 IF(NOT Tpetra_VMM_P3_MAP_MODE STREQUAL "baseline" AND
    NOT Tpetra_VMM_P3_MAP_MODE STREQUAL "allocation_only" AND
+   NOT Tpetra_VMM_P3_MAP_MODE STREQUAL "matrix_generalized" AND
    NOT Tpetra_VMM_P3_MAP_MODE STREQUAL "generalized")
-  MESSAGE(FATAL_ERROR "Tpetra_VMM_P3_MAP_MODE must be baseline, allocation_only, or generalized")
+  MESSAGE(FATAL_ERROR "Tpetra_VMM_P3_MAP_MODE must be baseline, allocation_only, matrix_generalized, or generalized")
 ENDIF()
 
 MACRO(TPETRA_VMM_REGISTER_P3_CASE caseName vmmEnabled nativeMv statsEnabled)
@@ -153,7 +156,8 @@ TPETRA_VMM_REGISTER_P4_CASE(BoundaryClassic VMM_Boundary 0 0 0 0 0)
 TPETRA_VMM_REGISTER_P4_CASE(BoundaryVmmNoStats VMM_Boundary 1 1 0 0 0)
 TPETRA_VMM_REGISTER_P4_CASE(BoundaryVmmStats VMM_Boundary 1 1 1 0 0)
 
-# Only these two jobs intentionally exercise DistObject's debug Map checks.
+# Only these two jobs enable debug: classical DistObject checks remain,
+# while native VMM also checks CrsMatrix's Map contract (M5.3).
 TPETRA_VMM_REGISTER_P4_CASE(DebugClassic VMM_Debug 0 0 1 1 0)
 TPETRA_VMM_REGISTER_P4_CASE(DebugVmm VMM_Debug 1 1 1 1 0)
 

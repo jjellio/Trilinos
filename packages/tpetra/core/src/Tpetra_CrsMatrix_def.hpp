@@ -4289,23 +4289,33 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     const auto rangeMap = this->getRangeMap();
     const auto comm = this->getComm();
 
-    // JE: it feels like this is unneeded, but some maps are optional
-    // Preserve the original eligibility criteria.  Priority-coded reasons
-    // make a rejection on another rank visible in rank 0's statistics log;
-    // the single MIN reduction replaces the original eligibility reduction.
+    // First check Map availability collectively, so every rank reaches
+    // the same construction-time directory operations.  VMM column
+    // addressing requires one-to-one domain ownership, but not contiguous
+    // GIDs: the domain Map may assign GIDs to local LIDs in any order.
     const int localMapReason = domainMap.is_null() ? 0
                              : colMap.is_null()    ? 1
                              : rowMap.is_null()    ? 2
-                             : rangeMap.is_null()  ? 3
-                             : !domainMap->isContiguous() ? 4 : 5;
-    int globalMapReason = 5;
+                             : rangeMap.is_null()  ? 3 : 4;
+    int globalMapReason = 4;
     Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
                                  localMapReason, Teuchos::outArg(globalMapReason));
-    if (globalMapReason != 5) {
+    if (globalMapReason != 4) {
       static constexpr const char* reasons[] = {
           "domain_map_null", "column_map_null", "row_map_null",
-          "range_map_null", "map_not_contiguous"};
+          "range_map_null"};
       logVmmSkip(reasons[globalMapReason]);
+      return;
+    }
+
+    // Map::isOneToOne() may initialize its Directory collectively.  All
+    // ranks participate, and the final decision is collective as well.
+    const int localOneToOne = domainMap->isOneToOne() ? 1 : 0;
+    int globalOneToOne = 0;
+    Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                 localOneToOne, Teuchos::outArg(globalOneToOne));
+    if (globalOneToOne == 0) {
+      logVmmSkip("domain_map_not_one_to_one");
       return;
     }
 
@@ -5222,6 +5232,150 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   TEUCHOS_TEST_FOR_EXCEPTION(!isFillComplete(), std::runtime_error,
                              fnName << ": Cannot call apply() until fillComplete() "
                                        "has been called.");
+
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && \
+    defined(HAVE_TPETRA_INST_CUDA) && \
+    defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
+  if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
+    const bool debug = Details::Behavior::debug("CrsMatrix");
+    // Debug-only validation for the direct VMM NO_TRANS candidate.  Do not
+    // validate alpha==0 (which doesn't read X), transpose, or classical-only
+    // calls here: their existing Tpetra contracts/diagnostics are unchanged.
+    // This collective is deliberately BEFORE tryApplyVmm's local predicates.
+    if (debug && mode == Teuchos::NO_TRANS &&
+        alpha != Teuchos::ScalarTraits<Scalar>::zero() &&
+        Details::Behavior::experimentalVmm() &&
+        Details::Behavior::experimentalVmmNativeMv()) {
+      const auto comm = this->getComm();
+      const auto domainMap = this->getDomainMap();
+      const auto rangeMap = this->getRangeMap();
+      const auto xMap = X.getMap();
+      const auto yMap = Y.getMap();
+
+      // The context is a collective fillComplete decision.  An ordinary X,
+      // an Exporter, or a replicated result instead uses classical apply.
+      // Reduce the entire candidate predicate before any Map comparison:
+      // no rank may independently enter Map::isSameAs(), which may reduce.
+      const int localCandidate =
+          (vmmContext_ && this->getGraph()->getExporter().is_null() &&
+           !rangeMap.is_null() && rangeMap->isDistributed() &&
+           X.isVmmBacked()) ? 1 : 0;
+      int allCandidates = 0;
+      int anyCandidates = 0;
+      Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                   localCandidate, Teuchos::outArg(allCandidates));
+      Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX,
+                                   localCandidate, Teuchos::outArg(anyCandidates));
+      TEUCHOS_TEST_FOR_EXCEPTION(
+          anyCandidates != allCandidates, std::invalid_argument,
+          fnName << ": VMM debug: ranks disagree on direct VMM structural "
+                    "eligibility (context, Exporter, range distribution or "
+                    "X storage); the same apply path is required on all ranks");
+      if (allCandidates != 0) {
+        const int localMapsPresent = !domainMap.is_null() && !rangeMap.is_null() &&
+                                     !xMap.is_null() && !yMap.is_null();
+        int allMapsPresent = 0;
+        Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                     localMapsPresent, Teuchos::outArg(allMapsPresent));
+        TEUCHOS_TEST_FOR_EXCEPTION(
+            allMapsPresent == 0, std::invalid_argument,
+            fnName << ": VMM debug: domain, range, X and Y Maps must be nonnull");
+
+        // Map::isSameAs() uses different paths depending on object identity
+        // and uniform/contiguous Map metadata.  These paths may communicate
+        // differently.  Before calling it, agree collectively on those
+        // paths and on the global Map properties that can trigger early
+        // returns.  Fall back to locallySameAs() plus our own reduction for
+        // rank-mixed cases (including identity on only one rank).
+        const auto mapsSameOnAllRanks = [&](const Teuchos::RCP<const map_type>& expected,
+                                            const Teuchos::RCP<const map_type>& actual) {
+          const int localPreconditions =
+              expected->getGlobalNumElements() == actual->getGlobalNumElements() &&
+              expected->getIndexBase() == actual->getIndexBase() &&
+              expected->isDistributed() == actual->isDistributed() &&
+              expected->getComm()->getSize() == actual->getComm()->getSize() &&
+              Tpetra::Details::congruent(*expected->getComm(), *actual->getComm()) &&
+              (!(expected->haveGlobalConstants() && actual->haveGlobalConstants()) ||
+               (expected->getMinAllGlobalIndex() == actual->getMinAllGlobalIndex() &&
+                expected->getMaxAllGlobalIndex() == actual->getMaxAllGlobalIndex()));
+          int allPreconditions = 0;
+          Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                       localPreconditions, Teuchos::outArg(allPreconditions));
+          if (allPreconditions == 0) return false;
+
+          const int localPath = expected.getRawPtr() == actual.getRawPtr() ? 0 :
+              (expected->isContiguous() && expected->isUniform() &&
+               actual->isContiguous() && actual->isUniform()) ? 1 : 2;
+          int minPath = 0;
+          int maxPath = 0;
+          Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                       localPath, Teuchos::outArg(minPath));
+          Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX,
+                                       localPath, Teuchos::outArg(maxPath));
+          if (minPath == maxPath) {
+            if (minPath == 0) return true;
+            // All ranks take the same fast or potentially collective path.
+            return expected->isSameAs(*actual);
+          }
+
+          // In rank-mixed cases, use exactly one reduction after locally
+          // checking the GID sequence (which may have a different LID order).
+          const int locallySame = expected->locallySameAs(*actual) ? 1 : 0;
+          int globallySame = 0;
+          Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                       locallySame, Teuchos::outArg(globallySame));
+          return globallySame == 1;
+        };
+
+        // Complete both potentially collective comparisons before throwing.
+        const bool domainSame = mapsSameOnAllRanks(domainMap, xMap);
+        const bool rangeSame = mapsSameOnAllRanks(rangeMap, yMap);
+        TEUCHOS_TEST_FOR_EXCEPTION(
+            !domainSame, std::invalid_argument,
+            fnName << ": VMM debug: domain-X Map mismatch; X must have "
+                      "the same Map distribution and local GID order as "
+                      "the matrix's domain Map");
+        TEUCHOS_TEST_FOR_EXCEPTION(
+            !rangeSame, std::invalid_argument,
+            fnName << ": VMM debug: range-Y Map mismatch; Y must have "
+                      "the same Map distribution and local GID order as "
+                      "the matrix's range Map");
+
+        // A VMM-backed X must expose its canonical physical allocation.
+        // Unsupported Y shapes/strides still fall through to classical Tpetra;
+        // they are not invalid Maps or reasons to throw in debug mode.
+        const auto* xLayout = X.getVmmLayout();
+        const auto* xGlobal = X.getVmmGlobalPtr();
+        const int localStorageValid = xLayout != nullptr && xGlobal != nullptr;
+        int allStorageValid = 0;
+        Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                     localStorageValid, Teuchos::outArg(allStorageValid));
+        TEUCHOS_TEST_FOR_EXCEPTION(
+            allStorageValid == 0, std::logic_error,
+            fnName << ": VMM debug: canonical VMM-backed X has no "
+                      "global pointer or layout");
+
+        const int localKernelShape =
+            X.getNumVectors() == 1 && Y.getNumVectors() == 1 &&
+            X.isConstantStride() && Y.isConstantStride() &&
+            Y.getLocalLength() == static_cast<std::size_t>(this->getLocalNumRows());
+        int allKernelShapes = 0;
+        Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                     localKernelShape, Teuchos::outArg(allKernelShapes));
+        if (allKernelShapes != 0) {
+          const int localLayoutValid = vmmContext_->isCompatibleLayout(*xLayout);
+          int allLayoutsValid = 0;
+          Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN,
+                                       localLayoutValid, Teuchos::outArg(allLayoutsValid));
+          TEUCHOS_TEST_FOR_EXCEPTION(
+              allLayoutsValid == 0, std::logic_error,
+              fnName << ": VMM debug: X allocation layout is incompatible "
+                        "with the matrix's addressed CRS layout");
+        }
+      }
+    }
+  }
+#endif  // Experimental CUDA VMM debug-only validation
 
   // Before apply
   const bool synchronize =

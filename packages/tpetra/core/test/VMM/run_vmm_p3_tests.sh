@@ -12,15 +12,15 @@ Usage: run_vmm_p3_tests.sh --exe /path/to/TpetraCore_VmmRegression.exe [options]
   --np N            MPI ranks (P3 requires 2)
   --outdir DIR      Per-scenario logs and results.tsv (default ./vmm-p3-results)
   --timeout SEC     Per-MPI job timeout (default 180)
-  --mode MODE       allocation_only (default M5.1), baseline (M4.1 historical),
-                    generalized (future acceptance oracle)
+  --mode MODE       matrix_generalized (default M5.2), allocation_only (M5.1),
+                    baseline (M4.1), generalized (future M5.4 acceptance)
   --quick           Classic, full VMM without stats, full VMM+stats (default)
   --full            All six VMM/native/stats combinations
   -h, --help        Show this help
 
 Launch: mpirun --bind-to none -np 2 <gpu_bind.sh> <exe> --group=VMM_Map
 CTest: ctest -j1 -R VMM_P3_NP2 -V
-Generalized mode is expected to FAIL until matrix indexing/dispatch is updated.
+Generalized mode is expected to FAIL until M5.4 removes Map-pointer checks.
 Historical baseline mode will fail native-MV Map storage checks after M5.1.
 USAGE
 }
@@ -32,7 +32,7 @@ np=2
 outdir='./vmm-p3-results'
 timeout_sec=180
 mode=quick
-map_mode=allocation_only
+map_mode=matrix_generalized
 
 while (($#)); do
   case "$1" in
@@ -62,7 +62,7 @@ done
 [[ -x "$gpu_bind" ]] || { echo "GPU binder missing/not executable: $gpu_bind" >&2; exit 2; }
 [[ "$np" =~ ^[0-9]+$ ]] && ((np == 2)) || { echo 'P3 requires --np 2' >&2; exit 2; }
 [[ "$timeout_sec" =~ ^[0-9]+$ ]] && ((timeout_sec > 0)) || { echo 'Invalid --timeout' >&2; exit 2; }
-[[ "$map_mode" == baseline || "$map_mode" == allocation_only || "$map_mode" == generalized ]] || { echo 'Invalid --mode' >&2; exit 2; }
+[[ "$map_mode" == baseline || "$map_mode" == allocation_only || "$map_mode" == matrix_generalized || "$map_mode" == generalized ]] || { echo 'Invalid --mode' >&2; exit 2; }
 command -v "$mpi_exec" >/dev/null 2>&1 || { echo "MPI launcher not found: $mpi_exec" >&2; exit 2; }
 command -v timeout >/dev/null 2>&1 || { echo 'GNU timeout is required' >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo 'Python3 is required' >&2; exit 2; }

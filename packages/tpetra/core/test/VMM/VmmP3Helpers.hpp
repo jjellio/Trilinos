@@ -21,23 +21,30 @@
 namespace TpetraVmmP3 {
 using namespace TpetraVmmP2;
 
-// The same fixtures support the M4.1 historical baseline, M5.1 native
-// allocation (without matrix-index generalization), and final acceptance.
+// Profiles preserve historical M4.1, M5.1 allocation-only, M5.2 matrix
+// addressing, and final M5.4 dispatch contracts independently.
 // This variable affects *tests only*, not Tpetra::Behavior.
-enum class MapTestMode { Baseline, AllocationOnly, Generalized };
+enum class MapTestMode { Baseline, AllocationOnly, MatrixGeneralized, Generalized };
 
 inline MapTestMode mapTestMode() {
   const char* raw = std::getenv("VMM_TEST_MAP_MODE");
-  if (raw == nullptr || std::string(raw) == "allocation_only")
-    return MapTestMode::AllocationOnly;
+  if (raw == nullptr) return MapTestMode::MatrixGeneralized;
   if (std::string(raw) == "baseline") return MapTestMode::Baseline;
+  if (std::string(raw) == "allocation_only") return MapTestMode::AllocationOnly;
+  if (std::string(raw) == "matrix_generalized")
+    return MapTestMode::MatrixGeneralized;
   if (std::string(raw) == "generalized") return MapTestMode::Generalized;
   throw std::invalid_argument(
-      "VMM_TEST_MAP_MODE must be baseline, allocation_only, or generalized");
+      "VMM_TEST_MAP_MODE must be baseline, allocation_only, matrix_generalized, or generalized");
 }
 
 inline bool expectGeneralizedMaps() {
   return mapTestMode() == MapTestMode::Generalized;
+}
+
+inline bool expectMatrixGeneralized() {
+  return mapTestMode() == MapTestMode::MatrixGeneralized ||
+         mapTestMode() == MapTestMode::Generalized;
 }
 
 inline bool expectGeneralizedMvAllocation() {
@@ -138,8 +145,9 @@ inline auto makeDiagonalWithDomain(const Teuchos::RCP<const map_type>& rowMap,
   return A;
 }
 
-// Matrix fillComplete still uses contiguous-GID addressing in M5.1; only
-// generalized mode expects different matrix eligibility diagnostics.
+// Matrix VMM addressing is generalized at M5.2, but raw Map-pointer
+// dispatch checks remain until M5.4.  Check the construction-time skip
+// reason separately from the SpMV execution path.
 // Capture only around *construction*, not around an MPI or device epoch.
 template <class MatrixFactory>
 auto makeAndCheckMatrix(const MatrixFactory& factory,

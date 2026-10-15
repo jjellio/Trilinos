@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Validate P3 numerical-suite completion and exact per-rank VMM dispatch.
+"""Validate P3 numerical results, matrix eligibility, and per-rank dispatch.
 
-The allocation_only mode verifies M5.1: generalized MV storage with unchanged
-matrix fallback and apply dispatch.  The generalized mode remains a future
-acceptance oracle; baseline records the historical M4.1 behavior.
+The matrix_generalized mode verifies M5.2 without prematurely assuming that
+M5.4 removes raw Map-pointer dispatch checks.  Older profiles remain available.
 """
 
 import argparse
@@ -47,12 +46,18 @@ def check_output(content: str, vmm: bool, native: bool, stats: bool,
             errors.append(f"stats=0 unexpectedly reported {len(found)} apply events")
         return errors
 
-    generalized = mode == "generalized"
-    direct = vmm and native and generalized
-    want_paths = {label: ("vmm" if direct else "classic")
-                  for label in LABELS}
-    # Non-1:1 domain is **never** a valid direct matrix addressing policy.
-    want_paths["P3_G05_NonOneToOneDomain"] = "classic"
+    matrix_generalized = mode in ("matrix_generalized", "generalized")
+    direct_matrix = vmm and native and matrix_generalized
+    direct_distinct = vmm and native and mode == "generalized"
+    want_paths = {
+        "P3_G01_Interleaved": "vmm" if direct_matrix else "classic",
+        "P3_G02_Permuted": "vmm" if direct_matrix else "classic",
+        "P3_G03_XDistinct": "vmm" if direct_distinct else "classic",
+        "P3_G03_YDistinct": "vmm" if direct_distinct else "classic",
+        "P3_G03_BothDistinct": "vmm" if direct_distinct else "classic",
+        # Non-1:1 domain is **never** valid for addressed CRS.
+        "P3_G05_NonOneToOneDomain": "classic",
+    }
     counts = Counter()
     for path, rank_str, label in found:
         rank = int(rank_str)
@@ -80,11 +85,11 @@ def check_output(content: str, vmm: bool, native: bool, stats: bool,
         found_skip = {label: reason for label, reason in SKIP.findall(content)
                       if label.startswith("P3_G")}
         expected_skips = {
-            "P3_G01_Interleaved": None if generalized else "map_not_contiguous",
-            "P3_G02_Permuted": None if generalized else "map_not_contiguous",
+            "P3_G01_Interleaved": None if matrix_generalized else "map_not_contiguous",
+            "P3_G02_Permuted": None if matrix_generalized else "map_not_contiguous",
             "P3_G03_XDistinct": None,
             "P3_G05_NonOneToOneDomain": (
-                "domain_map_not_one_to_one" if generalized else "map_not_contiguous"
+                "domain_map_not_one_to_one" if matrix_generalized else "map_not_contiguous"
             ),
         }
         for label, wanted in expected_skips.items():
@@ -101,8 +106,8 @@ def main():
     parser.add_argument("--vmm", type=int, choices=(0, 1), required=True)
     parser.add_argument("--native", type=int, choices=(0, 1), required=True)
     parser.add_argument("--stats", type=int, choices=(0, 1), required=True)
-    parser.add_argument("--mode", choices=("baseline", "allocation_only", "generalized"),
-                        default="allocation_only")
+    parser.add_argument("--mode", choices=("baseline", "allocation_only", "matrix_generalized", "generalized"),
+                        default="matrix_generalized")
     parser.add_argument("--np", type=int, default=2)
     args = parser.parse_args()
     if args.np != 2:

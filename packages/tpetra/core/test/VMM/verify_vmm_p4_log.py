@@ -20,6 +20,7 @@ APPLY = re.compile(
 )
 EMPTY = re.compile(r'\[VMM_P4\]\s+event=zeroRowsDispatch\s+rank=(\d+)\s+path=(\w+)')
 DEBUG = re.compile(r'\[VMM_P4\]\s+event=debugCaught\s+case=(\w+)\s+rank=(\d+)\s+result=(\w+)')
+DEBUG_SKIP = re.compile(r'\[VMM_P4\]\s+event=debugSkipped\s+case=(\w+)\s+rank=(\d+)\s+reason=(\w+)')
 TIMER = re.compile(r'\[VMM_P4\]\s+event=timer\s+rank=(\d+)\s+path=(\w+)\s+direct_delta=(-?\d+)\s+classic_delta=(-?\d+)')
 FABRIC = re.compile(r'\[VMM_P4\]\s+event=fabricProbe\s+rank=(\d+)\s+supported=([01])\s+reason=(\w+)')
 
@@ -27,7 +28,7 @@ FABRIC = re.compile(r'\[VMM_P4\]\s+event=fabricProbe\s+rank=(\d+)\s+supported=([
 def check(content: str, suite: str, vmm: bool, native: bool, stats: bool,
           mode: str, ranks: int = 2):
     errors = []
-    expected_runs = {"boundary": 3, "debug": 3, "timer": 1, "probe": 1}[suite]
+    expected_runs = {"boundary": 3, "debug": 9, "timer": 1, "probe": 1}[suite]
     if "End Result: TEST PASSED" not in content:
         errors.append("Teuchos failed or did not print the success trailer")
     summaries = [tuple(map(int, match.groups())) for match in SUMMARY.finditer(content)]
@@ -62,20 +63,40 @@ def check(content: str, suite: str, vmm: bool, native: bool, stats: bool,
     elif suite == "debug":
         if not stats:
             errors.append("debug test requires statistics trace")
-        want_debug = {"G06_InvalidX", "G06_InvalidY"}
+        old_cases = {"G06_InvalidX", "G06_InvalidY"}
+        vmm_only = {"G07_NoImporterX", "G07_NoExporterY",
+                    "G07_LocalOrdering", "G07_RankLocalX",
+                    "G07_RankMixedClasses"}
         found_debug = DEBUG.findall(content)
         observed_debug = Counter((int(rank), case, result)
                                  for case, rank, result in found_debug)
+        found_skips = DEBUG_SKIP.findall(content)
+        observed_skips = Counter((int(rank), case, reason)
+                                 for case, rank, reason in found_skips)
+        expected_debug = old_cases | (vmm_only if vmm and native else set())
+        expected_skips = set() if vmm and native else vmm_only
         for rank in range(ranks):
-            for case in want_debug:
+            for case in expected_debug:
                 if observed_debug[(rank, case, "PASS")] != 1:
-                    errors.append(f"rank={rank} missing debug exception {case}")
-        if len(found_debug) != ranks * len(want_debug):
+                    errors.append(f"rank={rank} missing validated exception {case}")
+            for case in expected_skips:
+                if observed_skips[(rank, case, "direct_vmm_unavailable")] != 1:
+                    errors.append(f"rank={rank} missing classic-only skip {case}")
+        if len(found_debug) != ranks * len(expected_debug):
             errors.append(f"unexpected debug exception markers: {found_debug}")
+        if len(found_skips) != ranks * len(expected_skips):
+            errors.append(f"unexpected debug skip markers: {found_skips}")
+
+        # InvalidX is rejected before applyNonTranspose's path trace only
+        # when native VMM debug validation is applicable. InvalidY uses an
+        # Exporter, so the original DistObject error path remains intact.
+        if not (vmm and native):
+            wanted["P4_G06_InvalidX"] = "classic"
         wanted.update({
-            "P4_G06_InvalidX": "classic",
             "P4_G06_InvalidY": "classic",
             "P4_G06_EquivalentValid":
+                "vmm" if vmm and native and mode == "generalized" else "classic",
+            "P4_G07_EquivalentNoImporter":
                 "vmm" if vmm and native and mode == "generalized" else "classic",
         })
     elif suite == "timer":
@@ -127,8 +148,8 @@ def main():
     parser.add_argument("--vmm", choices=(0, 1), type=int, required=True)
     parser.add_argument("--native", choices=(0, 1), type=int, required=True)
     parser.add_argument("--stats", choices=(0, 1), type=int, required=True)
-    parser.add_argument("--mode", choices=("baseline", "allocation_only", "generalized"),
-                        default="allocation_only")
+    parser.add_argument("--mode", choices=("baseline", "allocation_only", "matrix_generalized", "generalized"),
+                        default="matrix_generalized")
     parser.add_argument("--np", type=int, default=2)
     args = parser.parse_args()
     if args.np != 2:
