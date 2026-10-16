@@ -24,7 +24,11 @@
 #include "Teuchos_Assert.hpp"
 #include "KokkosKernels_ArithTraits.hpp"
 #include "BelosKokkosDenseAdapter.hpp"
+#include <iostream>
 #include <map>
+#include <memory>
+#include <sstream>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -131,19 +135,67 @@ public:
 
     Kokkos::push_finalize_hook([this]() {
       if (PoolStatus<Scalar, LO, GO, Node>::IsAllocated) {
-        // Pool has not yet been deallocated, release the stored Kokkos views
+        // VMM arenas must be released before Kokkos/CUDA finalization.
+        this->clearAvailableVmm();
+        // Preserve the existing standard DualView pool lifecycle.
         this->availableDVs.clear();
       }
     });
   }
 
   ~MultiVecPool() {
+    // No-op after the Kokkos finalize hook; also covers early destruction.
+    clearAvailableVmm();
     PoolStatus<Scalar, LO, GO, Node>::IsAllocated = false;
   }
 
   using MV = ::Tpetra::MultiVector<Scalar, LO, GO, Node>;
 
   Teuchos::RCP<MV> getMV(const Teuchos::RCP<const ::Tpetra::Map<LO, GO, Node>> & map, const int numVecs) {
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
+    // Experimental cache of complete native VMM MVs.  Rank-local reuse
+    // assumes matching checkout / return order across the communicator.
+    if (numVecs == 1 && !map.is_null() && !map->getComm().is_null() &&
+        map->getComm()->getSize() > 1 && map->isDistributed() &&
+        ::Tpetra::Details::Behavior::experimentalVmm() &&
+        ::Tpetra::Details::Behavior::experimentalVmmNativeMv() &&
+        std::is_same<typename MV::execution_space, Kokkos::Cuda>::value &&
+        std::is_same<typename MV::dual_view_type::t_dev::memory_space,
+                     Kokkos::CudaSpace>::value &&
+        std::is_trivially_copyable<typename MV::impl_scalar_type>::value) {
+      // Exact Map identity; keep an owner so the key cannot be recycled.
+      auto & entry = availableVmmMVs[map.getRawPtr()];
+      if (!entry) {
+        entry = std::make_shared<VmmFreeList>();
+        entry->map = map;
+      }
+      if (!entry->available.empty()) {
+        const auto slot = entry->available.back();
+        entry->available.pop_back();
+        TEUCHOS_ASSERT(slot.mv != nullptr && slot.mv->isVmmBacked() &&
+                       slot.mv->getMap().getRawPtr() == map.getRawPtr() &&
+                       slot.mv->getNumVectors() == 1);
+        ++entry->checkedOut;
+        logVmmPoolEvent("hit", map, slot.mv, slot.generation);
+        return Teuchos::rcpWithDealloc(
+            slot.mv, VmmRCPDeleter{entry, slot.generation});
+      }
+
+      // Native VMM construction may be collective; reuse is not.
+      std::unique_ptr<MV> candidate(new MV(map, 1, false));
+      if (candidate->isVmmBacked()) {
+        const size_t generation = nextVmmGeneration++;
+        MV* mv = candidate.release();
+        ++entry->checkedOut;
+        logVmmPoolEvent("miss", map, mv, generation);
+        return Teuchos::rcpWithDealloc(
+            mv, VmmRCPDeleter{entry, generation});
+      }
+      // If native allocation was unexpectedly unavailable, leave the
+      // existing conventional DualView pool in charge of this request.
+      logVmmPoolEvent("native_fallback", map, candidate.get(), nextVmmGeneration);
+    }
+#endif
     const auto num_local_elems = map->getLocalNumElements();
     size_t total_size = num_local_elems * numVecs;
 
@@ -180,6 +232,68 @@ public:
 
 private:
   using dv_t = typename MV::dual_view_type;
+  using map_t = typename MV::map_type;
+
+  struct VmmSlot {
+    MV* mv;
+    size_t generation;
+  };
+  struct VmmFreeList {
+    Teuchos::RCP<const map_t> map;
+    std::vector<VmmSlot> available;
+    size_t checkedOut = 0;
+    bool acceptingReturns = true;
+  };
+  struct VmmRCPDeleter {
+    std::shared_ptr<VmmFreeList> entry;
+    size_t generation;
+
+    void free(MV* mv_ptr) {
+      if (!mv_ptr) return;
+      TEUCHOS_ASSERT(entry->checkedOut != 0);
+      --entry->checkedOut;
+      if (PoolStatus<Scalar, LO, GO, Node>::IsAllocated &&
+          entry->acceptingReturns) {
+        logVmmPoolEvent("return", entry->map, mv_ptr, generation);
+        entry->available.push_back(VmmSlot{mv_ptr, generation});
+      } else {
+        // Experimental contract: borrowers must release before Kokkos
+        // finalization.  The shared entry itself cannot dangle.
+        delete mv_ptr;
+      }
+    }
+  };
+
+  static void logVmmPoolEvent(const char* event,
+                              const Teuchos::RCP<const map_t>& map,
+                              const MV* mv, const size_t generation) {
+    if (!::Tpetra::Details::Behavior::experimentalVmmStatistics() ||
+        map.is_null() || map->getComm().is_null()) return;
+    std::ostringstream os;
+    os << "[BELOS_MV_POOL] event=" << event
+       << " rank=" << map->getComm()->getRank()
+       << " map=" << static_cast<const void*>(map.getRawPtr())
+       << " object=" << static_cast<const void*>(mv)
+       << " rows=" << map->getLocalNumElements()
+       << " cols=1 generation=" << generation << '\n';
+    std::cout << os.str() << std::flush;
+  }
+
+  void clearAvailableVmm() {
+    for (auto & kv : availableVmmMVs) {
+      auto & entry = *kv.second;
+      // Must not invalidate a borrowed VMM mapping during finalization.
+      TEUCHOS_ASSERT(entry.checkedOut == 0);
+      entry.acceptingReturns = false;
+      for (const auto & slot : entry.available) {
+        logVmmPoolEvent("destroy", entry.map, slot.mv, slot.generation);
+        delete slot.mv;
+      }
+      entry.available.clear();
+    }
+    availableVmmMVs.clear();
+  }
+
   struct RCPDeleter
   {
     void free(MV * mv_ptr) {
@@ -200,6 +314,8 @@ private:
     dv_t dv;
   };
   std::map<size_t, std::vector<dv_t>> availableDVs;
+  std::map<const map_t*, std::shared_ptr<VmmFreeList>> availableVmmMVs;
+  size_t nextVmmGeneration = 0;
 };
 
 
