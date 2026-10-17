@@ -81,10 +81,13 @@ TEUCHOS_UNIT_TEST(VMM_MultiVector, M05_CopyViewAndSubviewLifetime) {
   Teuchos::RCP<vector_type> sub = owner->subViewNonConst(Teuchos::Range1D(0, 0));
   checkStorage(*shallow, nativeExpected(), "M05 Teuchos::View", out, success);
   checkStorage(*deep, nativeExpected(), "M05 Teuchos::Copy", out, success);
-  // Column subviews preserve the WrappedDualView's external owner, even
-  // though the prototype need not expose the *full* VMM descriptor on one.
+  // A full-column, one-column subview has the same canonical VMM identity
+  // as its parent (not merely a WrappedDualView external owner token).
+  checkStorage(*sub, nativeExpected(), "M05 full-column subview", out, success);
   if (nativeExpected()) {
     TEST_ASSERT(shallow->getVmmGlobalPtr() == owner->getVmmGlobalPtr());
+    TEST_ASSERT(sub->getVmmGlobalPtr() == owner->getVmmGlobalPtr());
+    TEST_ASSERT(sub->getVmmLayout() == owner->getVmmLayout());
     TEST_ASSERT(deep->getVmmGlobalPtr() != owner->getVmmGlobalPtr());
   }
   owner = Teuchos::null;

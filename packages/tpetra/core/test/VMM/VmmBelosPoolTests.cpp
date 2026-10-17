@@ -365,3 +365,55 @@ TEUCHOS_UNIT_TEST(VMM_BelosPool, B06_Ineligible_PreservesStandardPool) {
     off = Teuchos::null;
   }
 }
+
+// B07 directly verifies that Belos's column-view adapters preserve native
+// VMM identity without creating new VMM allocations.  Both overloads route
+// through Tpetra::MultiVector::subView(0,0).
+TEUCHOS_UNIT_TEST(VMM_BelosPool, B07_CloneViewsRetainCanonicalVmm) {
+  using namespace TpetraVmmBelosPool;
+  if (!twoRanks(out, success)) return;
+
+  const auto map = distributedMap();
+  vector_type source(map, 1);
+  setHost(source, [](go_type gid, std::size_t) { return input(gid); });
+  synchronizeToDevice(source);
+
+  auto byIndex = traits_type::CloneViewNonConst(source, std::vector<int>{0});
+  auto byRange = traits_type::CloneViewNonConst(source, Teuchos::Range1D(0, 0));
+  auto readIndex = traits_type::CloneView(source, std::vector<int>{0});
+  auto readRange = traits_type::CloneView(source, Teuchos::Range1D(0, 0));
+  checkOneColumnPoolStorage(*byIndex, "B07 Belos mutable index", out, success);
+  checkOneColumnPoolStorage(*byRange, "B07 Belos mutable range", out, success);
+  checkOneColumnPoolStorage(*readIndex, "B07 Belos const index", out, success);
+  checkOneColumnPoolStorage(*readRange, "B07 Belos const range", out, success);
+
+  const auto global = source.getVmmGlobalPtr();
+  const auto layout = source.getVmmLayout();
+  TEST_ASSERT(byIndex->getVmmGlobalPtr() == global);
+  TEST_ASSERT(byRange->getVmmGlobalPtr() == global);
+  TEST_ASSERT(readIndex->getVmmGlobalPtr() == global);
+  TEST_ASSERT(readRange->getVmmGlobalPtr() == global);
+  TEST_ASSERT(byIndex->getVmmLayout() == layout);
+  TEST_ASSERT(byRange->getVmmLayout() == layout);
+
+  // Mutable views alias source data; neither modifies source Map ownership.
+  setHost(*byRange, [](go_type gid, std::size_t) { return 90.0 + input(gid); });
+  synchronizeToDevice(*byRange);
+  producerReady();
+  checkHost(source, [](go_type gid, std::size_t) { return 90.0 + input(gid); },
+            "B07 Belos view alias", out, success);
+  consumerComplete();
+
+  // Belos's read-only full-column view must also drive VMM SpMV, not just
+  // expose the correct metadata.
+  const std::string label = "B07_BelosCloneView_AllRemote";
+  auto A = makeMatrix(map, map, map, label);
+  vector_type Y(map, 1);
+  const std::string path = nativeExpected() ? "vmm" : "classic";
+  applyWithExpectedPath(*A, *readIndex, Y, Teuchos::NO_TRANS,
+                        1.0, 0.0, path, label, out, success);
+  checkHost(Y, [](go_type gid, std::size_t) {
+    return 5.0 * 90.0 + allRemoteResult(gid);
+  }, "B07 Belos read-only view apply", out, success);
+  consumerComplete();
+}

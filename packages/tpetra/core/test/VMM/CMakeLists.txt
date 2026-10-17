@@ -9,7 +9,7 @@ TRIBITS_ADD_EXECUTABLE(
           VmmMapTests.cpp
           VmmBoundaryTests.cpp VmmDebugTests.cpp VmmTimerTests.cpp
           VmmFabricTests.cpp VmmApplyRejectionTests.cpp
-          VmmReplaceMapTests.cpp
+          VmmReplaceMapTests.cpp VmmSubviewTests.cpp
   COMM mpi
 )
 
@@ -313,3 +313,33 @@ TPETRA_VMM_REGISTER_REPLACEMAP_CASE(MatrixOnly                1 0 1)
 TPETRA_VMM_REGISTER_REPLACEMAP_CASE(NativeRequestedGlobalOff  0 1 1)
 TPETRA_VMM_REGISTER_REPLACEMAP_CASE(VmmNoStats                1 1 0)
 TPETRA_VMM_REGISTER_REPLACEMAP_CASE(VmmStats                  1 1 1)
+
+# Full-column subviews of one-column native VMM MultiVectors must retain
+# canonical VMM storage.  Keep these tests in Tpetra/core/test/VMM: no Belos
+# dependency is needed for the underlying view invariant.
+MACRO(TPETRA_VMM_REGISTER_SUBVIEW_CASE caseName vmmEnabled nativeMv statsEnabled)
+  TRIBITS_ADD_TEST(
+    VmmRegression
+    NAME VMM_Subview_NP2_${caseName}
+    ARGS "--group=VMM_Subview --globally-reduce-test-result"
+    COMM mpi
+    NUM_MPI_PROCS 2
+    ENVIRONMENT
+      "TPETRA_EXPERIMENTAL_VMM=${vmmEnabled}"
+      "TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=${nativeMv}"
+      "TPETRA_EXPERIMENTAL_VMM_STATISTICS=${statsEnabled}"
+      "TPETRA_EXPERIMENTAL_VMM_IPC=posix"
+      "TPETRA_SYNCHRONIZE_APPLY=0"
+      "TPETRA_DEBUG=0"
+    RUN_SERIAL
+    TIMEOUT 180
+    STANDARD_PASS_OUTPUT
+  )
+ENDMACRO()
+
+TPETRA_VMM_REGISTER_SUBVIEW_CASE(Classic                   0 0 0)
+TPETRA_VMM_REGISTER_SUBVIEW_CASE(ClassicStats              0 0 1)
+TPETRA_VMM_REGISTER_SUBVIEW_CASE(MatrixOnly                1 0 1)
+TPETRA_VMM_REGISTER_SUBVIEW_CASE(NativeRequestedGlobalOff  0 1 1)
+TPETRA_VMM_REGISTER_SUBVIEW_CASE(VmmNoStats                1 1 0)
+TPETRA_VMM_REGISTER_SUBVIEW_CASE(VmmStats                  1 1 1)

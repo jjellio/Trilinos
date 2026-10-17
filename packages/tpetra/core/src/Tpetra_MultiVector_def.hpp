@@ -3567,7 +3567,22 @@ MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
       const std::pair<size_t, size_t> cols(colRng.lbound(),
                                            colRng.ubound() + 1);
       wrapped_dual_view_type X_sub = takeSubview(this->view_, ALL(), cols);
-      X_ret                        = rcp(new MV(this->getMap(), X_sub));
+      RCP<MV> sub = rcp(new MV(this->getMap(), X_sub));
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+      // A full-column view of an already canonical one-column MV aliases
+      // exactly the same distributed allocation.  Keep its arena identity,
+      // as getVector(0) does.  Never attach the arena to a shifted column,
+      // a noncanonical view, or different physical storage.  This decision
+      // adds no MPI collectives or fences.
+      if (colRng.lbound() == 0 && colRng.ubound() == 0 &&
+          this->isVmmBacked() &&
+          (lclNumRows == 0 ||
+           sub->view_.implGetDualView().view_device().data() ==
+               this->vmmArena_->localPtr())) {
+        sub->vmmArena_ = this->vmmArena_;
+      }
+#endif
+      X_ret = sub;
     } else {
       if (static_cast<size_t>(colRng.size()) == static_cast<size_t>(1)) {
         // We're only asking for one column, so the result does have
