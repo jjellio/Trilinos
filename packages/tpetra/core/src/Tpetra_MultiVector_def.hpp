@@ -2753,6 +2753,29 @@ void MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   // was replaced with a Map with fewer processes, and finally the
   // original Map was restored on this call to replaceMap.
 
+#if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
+  // replaceMap() is not collective.  MueLu may call it on only the ranks
+  // surviving coarse-grid repartitioning.  In particular, NEVER call
+  // Map::isSameAs() or Teuchos::reduceAll() here.
+  //
+  // Preserve the native arena only for a true local no-op: the exact same
+  // Map object.  A different Map object, even one that appears locally
+  // equivalent, is conservatively treated as a changed distribution.
+  // Global equivalence cannot be established safely inside this method
+  // without turning a noncollective API into a collective one.
+  //
+  // This is intentionally experimental.  Callers must not use the direct
+  // VMM path with rank-inconsistent Maps or allocation generations.
+  const auto oldMap = this->getMap();
+  const bool hadVmmArena = static_cast<bool>(vmmArena_);
+  const bool retainVmmArena =
+      hadVmmArena && !oldMap.is_null() &&
+      oldMap.getRawPtr() == newMap.getRawPtr();
+  const char* vmmMapActionReason =
+      retainVmmArena ? "same_map" :
+      newMap.is_null() ? "new_map_null" : "map_changed";
+#endif
+
   if (this->getMap().is_null()) {  // current Map is null
     // If this->getMap() is null, that means that this MultiVector
     // has already had replaceMap happen to it.  In that case, just
@@ -2782,9 +2805,22 @@ void MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 
   this->map_ = newMap;
 #if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA)
-  // replaceMap may keep the bytes but changes the distributed meaning.
-  // The external owner in view_ still protects any borrowed VMM memory.
-  vmmArena_.reset();
+  if (!retainVmmArena) {
+    // The external owner in view_ still protects borrowed VMM memory, but
+    // a changed distribution must not expose the arena's global pointer.
+    vmmArena_.reset();
+  }
+  if (hadVmmArena && ::Tpetra::Details::Behavior::experimentalVmmStatistics()) {
+    const int rank = oldMap.is_null() ? -1 : oldMap->getComm()->getRank();
+    std::ostringstream os;
+    os << "[TPETRA_MV] event=replaceMapVmm rank=" << rank
+       << " action=" << (retainVmmArena ? "preserve" : "invalidate")
+       << " reason=" << vmmMapActionReason
+       << " old_map=" << static_cast<const void*>(oldMap.getRawPtr())
+       << " new_map=" << static_cast<const void*>(newMap.getRawPtr())
+       << " backed=" << (this->isVmmBacked() ? 1 : 0) << '\n';
+    std::cout << os.str() << std::flush;
+  }
 #endif
 }
 

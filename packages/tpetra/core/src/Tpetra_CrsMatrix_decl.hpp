@@ -3868,9 +3868,11 @@ class CrsMatrix : public RowMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>,
                     Scalar beta) const;
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
-  // Passive experimental extension points.  Neither invokes VMM yet.
+  // Experimental direct apply.  On a classical fallback, return the first
+  // failed local eligibility predicate for optional statistics diagnostics.
   void initializeVmmContext();
-  bool tryApplyVmm(const MV& X_in, MV& Y_in, Scalar alpha, Scalar beta) const;
+  bool tryApplyVmm(const MV& X_in, MV& Y_in, Scalar alpha, Scalar beta,
+                   const char*& rejectionReason) const;
 #endif  // TPETRA_ENABLE_EXPERIMENTAL_VMM
 
   //! Special case of apply() for <tt>mode != Teuchos::NO_TRANS</tt>.

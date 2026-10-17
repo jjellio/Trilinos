@@ -8,7 +8,8 @@ TRIBITS_ADD_EXECUTABLE(
           VmmMultiVectorTests.cpp VmmFallbackTests.cpp
           VmmMapTests.cpp
           VmmBoundaryTests.cpp VmmDebugTests.cpp VmmTimerTests.cpp
-          VmmFabricTests.cpp
+          VmmFabricTests.cpp VmmApplyRejectionTests.cpp
+          VmmReplaceMapTests.cpp
   COMM mpi
 )
 
@@ -81,6 +82,38 @@ ENDMACRO()
 
 TPETRA_VMM_REGISTER_P2_GROUP(MultiVector VMM_MultiVector)
 TPETRA_VMM_REGISTER_P2_GROUP(Fallback VMM_Fallback)
+
+# Diagnostics for each direct-VMM apply fallback, including mode/Behavior
+# gates.  These checks inspect each rank's stdout and verify the analytical
+# SpMV result in all six configurations, without introducing new env vars.
+MACRO(TPETRA_VMM_REGISTER_APPLY_REJECTION_CASE caseName vmmEnabled nativeMv statsEnabled)
+  TRIBITS_ADD_TEST(
+    VmmRegression
+    NAME VMM_ApplyRejection_NP2_${caseName}
+    ARGS "--group=VMM_ApplyRejection --globally-reduce-test-result"
+    COMM mpi
+    NUM_MPI_PROCS 2
+    ENVIRONMENT
+      "TPETRA_EXPERIMENTAL_VMM=${vmmEnabled}"
+      "TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=${nativeMv}"
+      "TPETRA_EXPERIMENTAL_VMM_STATISTICS=${statsEnabled}"
+      "TPETRA_EXPERIMENTAL_VMM_IPC=posix"
+      "TPETRA_SYNCHRONIZE_APPLY=0"
+      "TPETRA_DEBUG=0"
+    RUN_SERIAL
+    TIMEOUT 180
+    STANDARD_PASS_OUTPUT
+  )
+  message("ADDING ApplyRejection")
+ENDMACRO()
+
+message("ApplyRejection macros...")
+TPETRA_VMM_REGISTER_APPLY_REJECTION_CASE(Classic                   0 0 0)
+TPETRA_VMM_REGISTER_APPLY_REJECTION_CASE(ClassicStats              0 0 1)
+TPETRA_VMM_REGISTER_APPLY_REJECTION_CASE(MatrixOnly                1 0 1)
+TPETRA_VMM_REGISTER_APPLY_REJECTION_CASE(NativeRequestedGlobalOff  0 1 1)
+TPETRA_VMM_REGISTER_APPLY_REJECTION_CASE(VmmNoStats                1 1 0)
+TPETRA_VMM_REGISTER_APPLY_REJECTION_CASE(VmmStats                  1 1 1)
 
 # P3 Map-generalization *test* mode.  This is not a production VMM flag.
 # M5.4 exercises noncontiguous one-to-one matrix domain Maps and
@@ -250,3 +283,33 @@ TPETRA_VMM_REGISTER_SMOKE_CASE(ClassicStats              0 0 1)
 TPETRA_VMM_REGISTER_SMOKE_CASE(MatrixOnly                1 0 1)
 TPETRA_VMM_REGISTER_SMOKE_CASE(NativeRequestedGlobalOff  0 1 1)
 TPETRA_VMM_REGISTER_SMOKE_CASE(VmmNoStats                1 1 0)
+
+# Experiment A: retain native VMM identity across safe MultiVector::replaceMap
+# operations, but drop it for repartitioning, permutation and rank exclusion.
+# Use one fresh MPI process per Behavior configuration.
+MACRO(TPETRA_VMM_REGISTER_REPLACEMAP_CASE caseName vmmEnabled nativeMv statsEnabled)
+  TRIBITS_ADD_TEST(
+    VmmRegression
+    NAME VMM_ReplaceMap_NP2_${caseName}
+    ARGS "--group=VMM_ReplaceMap --globally-reduce-test-result"
+    COMM mpi
+    NUM_MPI_PROCS 2
+    ENVIRONMENT
+      "TPETRA_EXPERIMENTAL_VMM=${vmmEnabled}"
+      "TPETRA_EXPERIMENTAL_VMM_NATIVE_MV=${nativeMv}"
+      "TPETRA_EXPERIMENTAL_VMM_STATISTICS=${statsEnabled}"
+      "TPETRA_EXPERIMENTAL_VMM_IPC=posix"
+      "TPETRA_SYNCHRONIZE_APPLY=0"
+      "TPETRA_DEBUG=0"
+    RUN_SERIAL
+    TIMEOUT 240
+    STANDARD_PASS_OUTPUT
+  )
+ENDMACRO()
+
+TPETRA_VMM_REGISTER_REPLACEMAP_CASE(Classic                   0 0 0)
+TPETRA_VMM_REGISTER_REPLACEMAP_CASE(ClassicStats              0 0 1)
+TPETRA_VMM_REGISTER_REPLACEMAP_CASE(MatrixOnly                1 0 1)
+TPETRA_VMM_REGISTER_REPLACEMAP_CASE(NativeRequestedGlobalOff  0 1 1)
+TPETRA_VMM_REGISTER_REPLACEMAP_CASE(VmmNoStats                1 1 0)
+TPETRA_VMM_REGISTER_REPLACEMAP_CASE(VmmStats                  1 1 1)

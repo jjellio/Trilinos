@@ -4693,14 +4693,19 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 // Tpetra's domain/X and range/Y Map contract, just like classical apply.
 // The optional CrsMatrix debug path validates that contract collectively.
 // Unsupported inputs fall back to the ordinary Import/local-SpMV/Export path.
+// Report only the first failed local predicate; no additional collectives or
+// host/device synchronization are required to diagnose the fallback.
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     tryApplyVmm(const MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& X_in,
                 MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>& Y_in,
-                Scalar alpha, Scalar beta) const {
+                Scalar alpha, Scalar beta, const char*& rejectionReason) const {
 #if defined(HAVE_TPETRA_INST_CUDA) && defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
   if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
-    if (!vmmContext_) return false;
+    if (!vmmContext_) {
+      rejectionReason = "no_matrix_context";
+      return false;
+    }
 
     // A nonnull VMM pointer/layout requires a canonical, full one-column
     // MultiVector representation: isVmmBacked(), X shape/stride, and Map
@@ -4708,28 +4713,61 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     // object addresses or perform a potentially collective Map::isSameAs().
     const auto* xGlobal = X_in.getVmmGlobalPtr();
     const auto* xLayout = X_in.getVmmLayout();
-    if (xGlobal == nullptr || xLayout == nullptr) return false;
+    if (xGlobal == nullptr) {
+      rejectionReason = X_in.isVmmBacked() ? "x_global_ptr_null" : "x_not_vmm_backed";
+      return false;
+    }
+    if (xLayout == nullptr) {
+      rejectionReason = "x_layout_null";
+      return false;
+    }
 
-    // The caller guarantees the domain/X and range/Y Map contract.  Compare
-    // only fixed-size physical layout metadata here; the exact per-rank
-    // comparison remains in Behavior::debug("CrsMatrix") at apply() entry.
-    const bool eligible =
-        Y_in.getNumVectors() == 1 &&
-        Y_in.getLocalLength() == static_cast<std::size_t>(this->getLocalNumRows()) &&
-        Y_in.isConstantStride() &&
-        this->getGraph()->getExporter().is_null() &&
-        this->getRangeMap()->isDistributed() &&
-        &X_in != &Y_in &&
-        Y_in.getVmmGlobalPtr() != xGlobal &&
-        vmmContext_->isCompatibleApplyLayout(*xLayout);
+    // Preserve the original short-circuit eligibility order, reporting the
+    // first failing condition instead of a generic classic dispatch.  The
+    // caller guarantees the domain/X and range/Y Map contract; the exact
+    // collective Map validation remains in Behavior::debug("CrsMatrix").
+    if (Y_in.getNumVectors() != 1) {
+      rejectionReason = "y_num_vectors_not_one";
+      return false;
+    }
+    if (Y_in.getLocalLength() != static_cast<std::size_t>(this->getLocalNumRows())) {
+      rejectionReason = "y_length_mismatch";
+      return false;
+    }
+    if (!Y_in.isConstantStride()) {
+      rejectionReason = "y_nonconstant_stride";
+      return false;
+    }
+    if (!this->getGraph()->getExporter().is_null()) {
+      rejectionReason = "has_exporter";
+      return false;
+    }
+    if (this->getRangeMap().is_null()) {
+      rejectionReason = "range_map_null";
+      return false;
+    }
+    if (!this->getRangeMap()->isDistributed()) {
+      rejectionReason = "range_not_distributed";
+      return false;
+    }
+    if (&X_in == &Y_in) {
+      rejectionReason = "x_y_same_object";
+      return false;
+    }
+    if (Y_in.getVmmGlobalPtr() == xGlobal) {
+      rejectionReason = "x_y_same_global_ptr";
+      return false;
+    }
+    if (!vmmContext_->isCompatibleApplyLayout(*xLayout)) {
+      rejectionReason = "layout_incompatible";
+      return false;
+    }
 
-    if (!eligible) return false;
     std::optional<Teuchos::TimeMonitor> syncTimer;
     std::optional<Teuchos::TimeMonitor> applyTimer;
 
-
     if (Details::Behavior::synchronizeApply())
-       syncTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: sync"));
+      syncTimer.emplace(*Teuchos::TimeMonitor::getNewTimer("Tpetra VMM: sync"));
     // Honor Tpetra's host/device coherence contract.
     (void)X_in.getLocalViewDevice(Access::ReadOnly);
 
@@ -4748,6 +4786,9 @@ bool CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 
     return true;
   }
+  rejectionReason = "not_cuda_execution_space";
+#else
+  rejectionReason = "cuda_mpi_vmm_unavailable";
 #endif
   (void)X_in;
   (void)Y_in;
@@ -4787,6 +4828,37 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
        << '\n';
     std::cout << os.str() << std::flush;
   };
+
+  // Rank-local explanation for each classical nontranspose apply.  Keep this
+  // separate from event=apply so existing dispatch counters remain unchanged.
+  // No Map comparisons, barriers, or device synchronization are permitted in
+  // these diagnostics (a failed predicate can differ between MPI ranks).
+  const auto logVmmApplyRejection = [&](const char* reason) {
+    if (!Details::Behavior::experimentalVmmStatistics()) return;
+    const auto comm = this->getComm();
+    if (comm.is_null()) return;
+    const auto* identity = static_cast<const dist_object_type*>(this);
+    std::ostringstream os;
+    os << "[TPETRA_MATRIX] event=vmmSkip phase=apply"
+       << " reason=" << (reason == nullptr ? "unclassified_rejection" : reason)
+       << " rank=" << comm->getRank()
+       << " object=" << static_cast<const void*>(identity)
+       << " label=" << std::quoted(this->getObjectLabel())
+       << " x_object=" << static_cast<const void*>(&X_in)
+       << " x_map=" << static_cast<const void*>(X_in.getMap().getRawPtr())
+       << " x_vmm=" << (X_in.isVmmBacked() ? 1 : 0)
+       << " x_cols=" << X_in.getNumVectors()
+       << " x_local_rows=" << X_in.getLocalLength()
+       << " x_constant_stride=" << (X_in.isConstantStride() ? 1 : 0)
+       << " y_object=" << static_cast<const void*>(&Y_in)
+       << " y_map=" << static_cast<const void*>(Y_in.getMap().getRawPtr())
+       << " y_vmm=" << (Y_in.isVmmBacked() ? 1 : 0)
+       << " y_cols=" << Y_in.getNumVectors()
+       << " y_local_rows=" << Y_in.getLocalLength()
+       << " y_constant_stride=" << (Y_in.isConstantStride() ? 1 : 0)
+       << '\n';
+    std::cout << os.str() << std::flush;
+  };
 #endif
 
   // mfh 05 Jun 2014: Special case for alpha == 0.  I added this to
@@ -4805,24 +4877,32 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     return;
   }
 
+#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+  // A call can fall back before tryApplyVmm is entered, for example when
+  // native-MV mode is disabled.  Account for those gate failures as well.
+  const char* vmmRejectionReason = "cuda_mpi_vmm_unavailable";
+#endif
 #if defined(TPETRA_ENABLE_EXPERIMENTAL_VMM) && \
     defined(HAVE_TPETRA_INST_CUDA) && \
     defined(KOKKOS_ENABLE_CUDA) && defined(HAVE_MPI)
   if constexpr (std::is_same<execution_space, Kokkos::Cuda>::value) {
-    // The matrix context and native MV allocation were selected collectively
-    // at construction.  With Tpetra-compatible X/Y Maps, all ranks take the
-    // same dispatch path without any collectives inside this apply.
-    if (vmmContext_ && Details::Behavior::experimentalVmm() &&
-        Details::Behavior::experimentalVmmNativeMv() &&
-        this->tryApplyVmm(X_in, Y_in, alpha, beta)) {
+    if (!Details::Behavior::experimentalVmm()) {
+      vmmRejectionReason = "vmm_disabled";
+    } else if (!Details::Behavior::experimentalVmmNativeMv()) {
+      vmmRejectionReason = "native_mv_disabled";
+    } else if (this->tryApplyVmm(X_in, Y_in, alpha, beta,
+                                 vmmRejectionReason)) {
       logVmmApplyPath("vmm");
       return;
     }
+  } else {
+    vmmRejectionReason = "not_cuda_execution_space";
   }
 #endif
 
 #ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
   logVmmApplyPath("classic");
+  logVmmApplyRejection(vmmRejectionReason);
 #endif
 
   // Before comm and local spmv
@@ -5415,6 +5495,30 @@ void CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
       Kokkos::fence();
     }
   } else {
+#ifdef TPETRA_ENABLE_EXPERIMENTAL_VMM
+    // Restriction through P^T never enters applyNonTranspose or tryApplyVmm.
+    // Record it explicitly without modifying the existing apply path counts.
+    if (alpha != Teuchos::ScalarTraits<Scalar>::zero() &&
+        Details::Behavior::experimentalVmmStatistics()) {
+      const auto comm = this->getComm();
+      if (!comm.is_null()) {
+        const auto* identity = static_cast<const dist_object_type*>(this);
+        std::ostringstream os;
+        os << "[TPETRA_MATRIX] event=vmmSkip phase=apply"
+           << " reason=transpose_unsupported"
+           << " rank=" << comm->getRank()
+           << " object=" << static_cast<const void*>(identity)
+           << " label=" << std::quoted(this->getObjectLabel())
+           << " mode=" << (mode == Teuchos::TRANS ? "trans" : "conj_trans")
+           << " x_object=" << static_cast<const void*>(&X)
+           << " x_vmm=" << (X.isVmmBacked() ? 1 : 0)
+           << " y_object=" << static_cast<const void*>(&Y)
+           << " y_vmm=" << (Y.isVmmBacked() ? 1 : 0)
+           << '\n';
+        std::cout << os.str() << std::flush;
+      }
+    }
+#endif
     ProfilingRegion regionTranspose("Tpetra::CrsMatrix::apply (transpose)");
     this->applyTranspose(X, Y, mode, alpha, beta);
   }
