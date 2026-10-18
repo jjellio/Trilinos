@@ -7,334 +7,253 @@
 // *****************************************************************************
 // @HEADER
 //
-// P0 only: a header-local NVSHMEM bootstrap and a symmetric-buffer smoke test.
-// This file is NOT part of the Tpetra library. Include it only in the
-// PerformanceCGSolve experiment when PERFORMANCE_CGSOLVE_NVSHMEM_P0 is enabled.
-// The small GPU kernel is compiled separately in NvshmemP0.cu.
+// P0 only. Header-only Kokkos/NVSHMEM smoke test used by PerformanceCGSolve.
+// The actual Import packing comparison is a subsequent milestone.
 
-#ifndef PERFORMANCE_CGSOLVE_NVSHMEM_P0_HPP
-#define PERFORMANCE_CGSOLVE_NVSHMEM_P0_HPP
+#ifndef TPETRA_PERFORMANCE_NVSHMEM_P0_HPP
+#define TPETRA_PERFORMANCE_NVSHMEM_P0_HPP
 
 #include "Tpetra_Access.hpp"
 #include "Kokkos_Core.hpp"
-
 #include <mpi.h>
-#include <cuda_runtime.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
 
 #include <algorithm>
-#include <array>
-#include <climits>
+#include <cstdlib>
 #include <cstddef>
-#include <cstdint>
 #include <iostream>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
-#include <type_traits>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace NvshmemP0 {
 
-inline void checkCuda(cudaError_t code, const char* action) {
-  if (code != cudaSuccess) {
-    std::ostringstream os;
-    os << "NVSHMEM P0 " << action << ": " << cudaGetErrorString(code);
-    throw std::runtime_error(os.str());
+inline void checkMpi(int error, const char* where) {
+  if (error != MPI_SUCCESS) {
+    throw std::runtime_error(std::string("NVSHMEM P0: MPI error in ") + where);
   }
 }
 
-inline void checkMpi(int code, const char* action) {
-  if (code != MPI_SUCCESS) {
-    std::ostringstream os;
-    os << "NVSHMEM P0 " << action << " failed (MPI error " << code << ")";
-    throw std::runtime_error(os.str());
-  }
-}
-
-struct DeviceBinding {
-  int device = -1;
-  int localRank = -1;
-  int localSize = 0;
-  int visibleDevices = 0;
-  std::string pciBusId;
-};
-
-// Call after MPI initialization and BEFORE Kokkos::initialize and NVSHMEM init.
-// Handles both a shared CUDA_VISIBLE_DEVICES list and one GPU exposed per rank.
-// Initial P0 rejects use of the same physical PCIe GPU by two ranks on a node.
-inline DeviceBinding bindCudaDevice(MPI_Comm world) {
-  MPI_Comm shared = MPI_COMM_NULL;
+// Used before Kokkos initialization. Kokkos selects the CUDA GPU; there is
+// intentionally no cudaSetDevice, cudaMalloc, cudaMemcpy or CUDA kernel launch.
+inline int nodeLocalMpiRank(MPI_Comm world) {
+  MPI_Comm local = MPI_COMM_NULL;
   checkMpi(MPI_Comm_split_type(world, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL,
-                               &shared), "MPI_Comm_split_type");
-  DeviceBinding b;
-  checkMpi(MPI_Comm_rank(shared, &b.localRank), "local rank");
-  checkMpi(MPI_Comm_size(shared, &b.localSize), "local size");
-  checkCuda(cudaGetDeviceCount(&b.visibleDevices), "cudaGetDeviceCount");
-  if (b.visibleDevices < 1) {
-    throw std::runtime_error("NVSHMEM P0 requires a visible CUDA GPU");
-  }
-  b.device = b.localRank % b.visibleDevices;
-  checkCuda(cudaSetDevice(b.device), "cudaSetDevice");
-
-  std::array<char, 64> bus = {{0}};
-  checkCuda(cudaDeviceGetPCIBusId(bus.data(), static_cast<int>(bus.size()),
-                                  b.device), "cudaDeviceGetPCIBusId");
-  b.pciBusId = bus.data();
-  std::vector<char> allBusIds(static_cast<size_t>(b.localSize) * bus.size());
-  checkMpi(MPI_Allgather(bus.data(), static_cast<int>(bus.size()), MPI_CHAR,
-                          allBusIds.data(), static_cast<int>(bus.size()), MPI_CHAR,
-                          shared), "allgather GPU identity");
-  for (int i = 0; i < b.localSize; ++i) {
-    for (int j = i + 1; j < b.localSize; ++j) {
-      const char* left  = allBusIds.data() + static_cast<size_t>(i) * bus.size();
-      const char* right = allBusIds.data() + static_cast<size_t>(j) * bus.size();
-      if (std::string(left) == std::string(right)) {
-        std::ostringstream os;
-        os << "P0 needs one rank per physical GPU; node-local ranks " << i
-           << " and " << j << " both selected " << left
-           << ". Check GPU binding or CUDA_VISIBLE_DEVICES.";
-        throw std::runtime_error(os.str());
-      }
-    }
-  }
-  checkMpi(MPI_Comm_free(&shared), "free local communicator");
-  return b;
+                               &local), "MPI_Comm_split_type");
+  int rank = -1;
+  checkMpi(MPI_Comm_rank(local, &rank), "MPI_Comm_rank(shared)");
+  checkMpi(MPI_Comm_free(&local), "MPI_Comm_free(shared)");
+  return rank;
 }
 
-// Defined in NvshmemP0.cu; this is intentionally a genuine DEVICE-issued RMA.
-cudaError_t launchScalarGet(const double* symmetricSource,
-                            int sourcePe,
-                            double* localDeviceResult,
-                            cudaStream_t stream);
-
-// MPI owns communicator lifetime. This session must be destroyed BEFORE
-// Kokkos::finalize and MPI_Finalize. No MPI collectives occur in the destructor.
+// NVSHMEM is initialized AFTER Kokkos selected/initialized its CUDA device,
+// and finalized BEFORE Kokkos and MPI are finalized.
 class Session {
  public:
-  Session() = default;
-  Session(const Session&) = delete;
-  Session& operator=(const Session&) = delete;
-
-  void initialize(MPI_Comm comm) {
-    if (initialized_) throw std::logic_error("NVSHMEM P0 initialized twice");
-    comm_ = comm;
+  explicit Session(MPI_Comm comm) : comm_(comm) {
     checkMpi(MPI_Comm_rank(comm_, &rank_), "MPI_Comm_rank");
-    checkMpi(MPI_Comm_size(comm_, &size_), "MPI_Comm_size");
+    checkMpi(MPI_Comm_size(comm_, &numRanks_), "MPI_Comm_size");
 
-    // Initializer macro is available in newer NVSHMEM, but support earlier
-    // releases where zero initialization was the documented interface.
-#ifdef NVSHMEMX_INIT_ATTR_INITIALIZER
-    nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
-#else
     nvshmemx_init_attr_t attr = {};
-#endif
-    MPI_Comm commHandle = comm_;
-    attr.mpi_comm = &commHandle;
+    MPI_Comm world = comm_;
+    attr.mpi_comm = &world;
     const int rc = nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
     if (rc != 0) {
-      std::ostringstream os;
-      os << "nvshmemx_init_attr returned " << rc;
-      throw std::runtime_error(os.str());
+      throw std::runtime_error("NVSHMEM P0: nvshmemx_init_attr failed: " +
+                               std::to_string(rc));
     }
     initialized_ = true;
-    myPe_ = nvshmem_my_pe();
-    nPes_ = nvshmem_n_pes();
-    if (nPes_ != size_) throw std::runtime_error("MPI size and NVSHMEM PE count differ");
-    peToRank_.assign(static_cast<size_t>(nPes_), -1);
-    std::vector<int> peForRank(static_cast<size_t>(size_));
-    checkMpi(MPI_Allgather(&myPe_, 1, MPI_INT, peForRank.data(), 1, MPI_INT,
-                           comm_), "collect NVSHMEM PE mapping");
-    for (int r = 0; r < size_; ++r) {
-      const int pe = peForRank[static_cast<size_t>(r)];
-      if (pe < 0 || pe >= nPes_ || peToRank_[static_cast<size_t>(pe)] != -1) {
-        throw std::runtime_error("NVSHMEM PE mapping is not a permutation of MPI ranks");
+
+    pe_ = nvshmem_my_pe();
+    const int nPes = nvshmem_n_pes();
+    if (nPes != numRanks_) {
+      throw std::runtime_error("NVSHMEM P0: MPI and NVSHMEM sizes differ");
+    }
+    std::vector<int> peForRank(static_cast<std::size_t>(numRanks_));
+    rankForPe_.assign(static_cast<std::size_t>(nPes), -1);
+    checkMpi(MPI_Allgather(&pe_, 1, MPI_INT, peForRank.data(), 1, MPI_INT,
+                            comm_), "MPI_Allgather(PE)");
+    for (int r = 0; r < numRanks_; ++r) {
+      const int otherPe = peForRank[static_cast<std::size_t>(r)];
+      if (otherPe < 0 || otherPe >= nPes ||
+          rankForPe_[static_cast<std::size_t>(otherPe)] != -1) {
+        throw std::runtime_error("NVSHMEM P0: invalid MPI rank / PE mapping");
       }
-      peToRank_[static_cast<size_t>(pe)] = r;
+      rankForPe_[static_cast<std::size_t>(otherPe)] = r;
     }
   }
+
+  Session(const Session&) = delete;
+  Session& operator=(const Session&) = delete;
 
   ~Session() {
     if (initialized_) nvshmem_finalize();
   }
 
-  int rank() const { return rank_; }
-  int pe() const { return myPe_; }
-  int npes() const { return nPes_; }
-  int rankForPe(int pe) const { return peToRank_.at(static_cast<size_t>(pe)); }
-  MPI_Comm comm() const { return comm_; }
-
-  void printConfiguration(const DeviceBinding& binding) const {
-    int driver = 0, runtime = 0;
-    checkCuda(cudaDriverGetVersion(&driver), "cudaDriverGetVersion");
-    checkCuda(cudaRuntimeGetVersion(&runtime), "cudaRuntimeGetVersion");
-    cudaDeviceProp prop;
-    checkCuda(cudaGetDeviceProperties(&prop, binding.device), "cudaGetDeviceProperties");
-
-    char processor[MPI_MAX_PROCESSOR_NAME] = {};
-    int nameLength = 0;
-    checkMpi(MPI_Get_processor_name(processor, &nameLength), "processor name");
-    int specMajor = 0, specMinor = 0;
-    nvshmem_info_get_version(&specMajor, &specMinor);
-    char vendor[NVSHMEM_MAX_NAME_LEN] = {};
-    nvshmem_info_get_name(vendor);
-
-    // Deterministic startup output, outside all timing regions.
-    for (int r = 0; r < size_; ++r) {
-      checkMpi(MPI_Barrier(comm_), "logging barrier");
+  void describe(int selectedDeviceId) const {
+    int major = 0, minor = 0;
+    nvshmem_info_get_version(&major, &minor);
+    for (int r = 0; r < numRanks_; ++r) {
+      checkMpi(MPI_Barrier(comm_), "MPI_Barrier(P0 diagnostics)");
       if (rank_ == r) {
-        std::cout << "[NVSHMEM P0] mpi_rank=" << rank_ << "/" << size_
-                  << " nvshmem_pe=" << myPe_ << "/" << nPes_
-                  << " host=" << processor
-                  << " local_rank=" << binding.localRank << "/" << binding.localSize
-                  << " cuda_device=" << binding.device
-                  << " gpu='" << prop.name << "' bus=" << binding.pciBusId
-                  << " cuda_driver=" << driver << " cuda_runtime=" << runtime
-                  << " nvshmem_vendor='" << vendor << "'"
-                  << " nvshmem_spec=" << specMajor << "." << specMinor
-#ifdef NVSHMEM_VENDOR_MAJOR_VERSION
-                  << " nvshmem_version=" << NVSHMEM_VENDOR_MAJOR_VERSION
-#ifdef NVSHMEM_VENDOR_MINOR_VERSION
-                  << "." << NVSHMEM_VENDOR_MINOR_VERSION
-#endif
-#ifdef NVSHMEM_VENDOR_PATCH_VERSION
-                  << "." << NVSHMEM_VENDOR_PATCH_VERSION
-#endif
-#endif
+        std::cout << "[NVSHMEM P0] mpi_rank=" << rank_
+                  << " nvshmem_pe=" << pe_
+                  << " kokkos_selected_device=" << selectedDeviceId
+                  << " nvshmem_api=" << major << "." << minor
                   << std::endl;
       }
     }
-    checkMpi(MPI_Barrier(comm_), "final logging barrier");
-    if (rank_ == 0) {
-      char version[MPI_MAX_LIBRARY_VERSION_STRING] = {};
-      int len = 0;
-      checkMpi(MPI_Get_library_version(version, &len), "MPI library version");
-      std::cout << "[NVSHMEM P0] MPI library: "
-                << std::string(version, static_cast<size_t>(len)) << std::endl;
-    }
+    checkMpi(MPI_Barrier(comm_), "MPI_Barrier(P0 diagnostics completion)");
+    if (rank_ == 0) Kokkos::print_configuration(std::cout);
+  }
+
+  MPI_Comm comm() const { return comm_; }
+  int mpiRank() const { return rank_; }
+  int pe() const { return pe_; }
+  int numPes() const { return numRanks_; }
+  int mpiRankForPe(int requestedPe) const {
+    return rankForPe_.at(static_cast<std::size_t>(requestedPe));
   }
 
  private:
   MPI_Comm comm_ = MPI_COMM_NULL;
-  bool initialized_ = false;
   int rank_ = -1;
-  int size_ = 0;
-  int myPe_ = -1;
-  int nPes_ = 0;
-  std::vector<int> peToRank_;
+  int numRanks_ = 0;
+  int pe_ = -1;
+  bool initialized_ = false;
+  std::vector<int> rankForPe_;
 };
 
-// This validates P0 plumbing. This is NOT a Tpetra Import benchmark yet.
-// The input must be a rank-local, one-column double Tpetra Vector with a
-// deterministic value (MPI rank + 1) in every owned slot.
+// A pure-Kokkos P0 smoke test. The original Tpetra Vector remains ordinary
+// Tpetra/Kokkos allocated memory; the NVSHMEM symmetric clone is an unmanaged
+// Kokkos view. 'nvshmem_double_g' executes IN the Kokkos CUDA parallel_for.
+//
+// The input vector's local entries must equal MPI rank + 1. The test does
+// not attempt to reproduce a Tpetra Import plan yet (that is P1/P3).
 template<class Vector>
-int smokeTest(const Vector& source, MPI_Comm comm) {
-  int rank = -1;
-  int nRanks = 0;
-  checkMpi(MPI_Comm_rank(comm, &rank), "MPI rank in smoke test");
-  checkMpi(MPI_Comm_size(comm, &nRanks), "MPI size in smoke test");
-  const int myPe = nvshmem_my_pe();
-  const int nPes = nvshmem_n_pes();
-  if (nRanks != nPes) throw std::runtime_error("MPI/NVSHMEM size mismatch");
-  std::vector<int> peForRank(static_cast<size_t>(nRanks));
-  std::vector<int> rankForPe(static_cast<size_t>(nPes), -1);
-  checkMpi(MPI_Allgather(&myPe, 1, MPI_INT, peForRank.data(), 1,
-                          MPI_INT, comm), "smoke PE map");
-  for (int r = 0; r < nRanks; ++r) {
-    const int pe = peForRank[static_cast<size_t>(r)];
-    if (pe < 0 || pe >= nPes || rankForPe[static_cast<size_t>(pe)] != -1)
-      throw std::runtime_error("inconsistent MPI-rank / NVSHMEM-PE mapping");
-    rankForPe[static_cast<size_t>(pe)] = r;
-  }
-  static_assert(std::is_same<typename Vector::impl_scalar_type, double>::value,
-                "P0 symmetric clone currently supports only native double");
+int smokeTest(const Vector& source, const Session& session) {
+  using scalar_type = typename Vector::scalar_type;
+  static_assert(std::is_same<scalar_type, double>::value,
+                "NVSHMEM P0 supports Tpetra Vector<double> only");
+
   if (source.getNumVectors() != 1) {
-    throw std::runtime_error("NVSHMEM P0 smoke requires exactly one vector column");
-  }
-  const size_t nLocal = source.getLocalLength();
-  if (nLocal > static_cast<size_t>(std::numeric_limits<unsigned long long>::max())) {
-    throw std::overflow_error("local source length exceeds MPI reduction type");
-  }
-  const unsigned long long localSize = static_cast<unsigned long long>(nLocal);
-  unsigned long long maxSize = 0;
-  checkMpi(MPI_Allreduce(&localSize, &maxSize, 1, MPI_UNSIGNED_LONG_LONG,
-                          MPI_MAX, comm), "maximum local vector length");
-  maxSize = std::max(1ULL, maxSize);
-  if (maxSize > static_cast<unsigned long long>(SIZE_MAX / sizeof(double))) {
-    throw std::overflow_error("NVSHMEM P0 symmetric allocation size overflow");
+    throw std::runtime_error("NVSHMEM P0 requires one vector column");
   }
 
-  double* symmetric = static_cast<double*>(
-      nvshmem_malloc(static_cast<size_t>(maxSize) * sizeof(double)));
-  if (symmetric == nullptr) throw std::runtime_error("nvshmem_malloc failed");
-
-  Kokkos::fence("NVSHMEM P0: finish source-vector initialization");
-  auto sourceDevice = source.getLocalViewDevice(Tpetra::Access::ReadOnly);
-  if (sourceDevice.extent(0) != nLocal || sourceDevice.extent(1) != 1) {
-    throw std::runtime_error("unexpected source device view shape");
+  const std::size_t nLocal = source.getLocalLength();
+  if (nLocal > static_cast<std::size_t>(
+                   std::numeric_limits<unsigned long long>::max())) {
+    throw std::overflow_error("NVSHMEM P0 local length is too large");
   }
-  if (nLocal != 0) {
-    checkCuda(cudaMemcpy(symmetric, sourceDevice.data(), nLocal * sizeof(double),
-                         cudaMemcpyDeviceToDevice), "clone Tpetra Vector into symmetric source");
-  } else {
-    // All PEs allocate >= 1 element; an empty rank's slot 0 is a test sentinel.
-    const double sentinel = static_cast<double>(rank + 1);
-    checkCuda(cudaMemcpy(symmetric, &sentinel, sizeof(double), cudaMemcpyHostToDevice),
-              "seed empty-rank sentinel");
-  }
-  checkCuda(cudaDeviceSynchronize(), "finish symmetric source publication");
-  nvshmem_barrier_all();  // P0 readiness only; not a timed gather or a future fence design.
-
-  double cloneFirst = 0;
-  checkCuda(cudaMemcpy(&cloneFirst, symmetric, sizeof(double),
-                       cudaMemcpyDeviceToHost), "validate symmetric clone");
-  bool cloneOk = (cloneFirst == static_cast<double>(rank + 1));
-  if (nLocal > 1) {
-    double cloneLast = 0;
-    checkCuda(cudaMemcpy(&cloneLast, symmetric + (nLocal - 1), sizeof(double),
-                         cudaMemcpyDeviceToHost), "check last symmetric clone entry");
-    cloneOk = cloneOk && (cloneLast == static_cast<double>(rank + 1));
+  const unsigned long long length = static_cast<unsigned long long>(nLocal);
+  unsigned long long maxLength = 0;
+  checkMpi(MPI_Allreduce(&length, &maxLength, 1, MPI_UNSIGNED_LONG_LONG,
+                          MPI_MAX, session.comm()), "MPI_Allreduce(max length)");
+  maxLength = std::max(1ULL, maxLength); // symmetric allocation even on empty ranks
+  if (maxLength > static_cast<unsigned long long>(
+                      std::numeric_limits<std::size_t>::max() / sizeof(double))) {
+    throw std::overflow_error("NVSHMEM P0 symmetric allocation would overflow");
   }
 
-  const int sourcePe = (myPe + 1) % nPes;
-  const double expected = static_cast<double>(rankForPe.at(static_cast<size_t>(sourcePe)) + 1);
-  double* deviceResult = nullptr;
-  checkCuda(cudaMalloc(reinterpret_cast<void**>(&deviceResult), sizeof(double)),
-            "allocate local result");
-  checkCuda(launchScalarGet(symmetric, sourcePe, deviceResult, nullptr),
-            "launch GPU-initiated nvshmem_double_g");
-  checkCuda(cudaDeviceSynchronize(), "complete GPU-initiated get");
-  double observed = 0;
-  checkCuda(cudaMemcpy(&observed, deviceResult, sizeof(double),
-                       cudaMemcpyDeviceToHost), "read remote-get result");
-  checkCuda(cudaFree(deviceResult), "free local result");
+  // NVSHMEM symmetric allocations are collective; all PEs use maxLength.
+  double* symmetricPointer = static_cast<double*>(
+      nvshmem_malloc(static_cast<std::size_t>(maxLength) * sizeof(double)));
+  if (symmetricPointer == nullptr) {
+    throw std::runtime_error("NVSHMEM P0: nvshmem_malloc failed");
+  }
 
-  // No PE may free its symmetric source while another PE still reads it.
+  using SymmetricView = Kokkos::View<
+      double*, Kokkos::CudaSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+  SymmetricView symmetric(symmetricPointer, static_cast<std::size_t>(maxLength));
+  auto owned = source.getLocalViewDevice(Tpetra::Access::ReadOnly);
+  const double marker = static_cast<double>(session.mpiRank() + 1);
+
+  // Clone the stock Tpetra input into its local symmetric allocation, using
+  // Kokkos only. Rank-local length may differ between PEs. The first slot of
+  // a zero-length rank is populated with a smoke-test sentinel.
+  const std::size_t cloneCount = std::max(std::size_t(1), nLocal);
+  Kokkos::parallel_for(
+      "NvshmemP0::clone",
+      Kokkos::RangePolicy<Kokkos::Cuda, Kokkos::IndexType<std::size_t>>(
+          0, cloneCount),
+      KOKKOS_LAMBDA(const std::size_t i) {
+        symmetric(i) = i < nLocal ? owned(i, 0) : marker;
+      });
+  Kokkos::fence("NVSHMEM P0 finish Kokkos source clone");
+
+  // This barrier is intentionally outside any future gather benchmark. It
+  // protects producer readiness; it is NOT the intended hot-path algorithm.
   nvshmem_barrier_all();
-  nvshmem_free(symmetric);
 
-  const int failure = (!cloneOk || observed != expected) ? 1 : 0;
-  int anyFailure = 0;
-  checkMpi(MPI_Allreduce(&failure, &anyFailure, 1, MPI_INT,
-                          MPI_MAX, comm), "smoke correctness reduction");
-  std::cout << "[NVSHMEM P0] rank=" << rank
-            << " source_pe=" << sourcePe
-            << " local_elements=" << localSize
-            << " symmetric_elements=" << maxSize
-            << " got=" << observed << " expected=" << expected
-            << " status=" << (failure == 0 ? "PASS" : "FAIL") << std::endl;
-  if (rank == 0) {
-    std::cout << "[NVSHMEM P0] "
-              << (anyFailure == 0 ? "PASS" : "FAIL")
-              << " (" << (nPes > 1 ? "remote GPU get" : "one-PE local smoke")
-              << "; P1 plan/import and P2/P3 performance are not implemented)"
-              << std::endl;
+  // Select the next PE in PE-number order and determine how much real X it
+  // owns. MPI ranks and NVSHMEM PE numbers are not assumed identical.
+  const int sourcePe = (session.pe() + 1) % session.numPes();
+  const int sourceRank = session.mpiRankForPe(sourcePe);
+  std::vector<unsigned long long> allLengths(
+      static_cast<std::size_t>(session.numPes()));
+  checkMpi(MPI_Allgather(&length, 1, MPI_UNSIGNED_LONG_LONG,
+                          allLengths.data(), 1, MPI_UNSIGNED_LONG_LONG,
+                          session.comm()), "MPI_Allgather(local length)");
+  const unsigned long long remoteLength =
+      allLengths.at(static_cast<std::size_t>(sourceRank));
+  const std::size_t sampleCount = static_cast<std::size_t>(
+      std::min(32ULL, std::max(1ULL, remoteLength)));
+
+  Kokkos::View<double*, Kokkos::CudaSpace> gathered(
+      "NVSHMEM P0 remotely gathered values", sampleCount);
+  const double* symmetricBase = symmetricPointer;
+
+  // GPU-initiated communication, launched and indexed entirely by Kokkos.
+  Kokkos::parallel_for(
+      "NvshmemP0::remote_get",
+      Kokkos::RangePolicy<Kokkos::Cuda, Kokkos::IndexType<std::size_t>>(
+          0, sampleCount),
+      KOKKOS_LAMBDA(const std::size_t i) {
+        gathered(i) = nvshmem_double_g(symmetricBase + i, sourcePe);
+      });
+  Kokkos::fence("NVSHMEM P0 complete GPU-initiated NVSHMEM gets");
+
+  auto gatheredHost = Kokkos::create_mirror_view_and_copy(
+      Kokkos::HostSpace(), gathered);
+  const double expected = static_cast<double>(sourceRank + 1);
+  int localFailed = 0;
+  for (std::size_t i = 0; i < sampleCount; ++i) {
+    if (gatheredHost(i) != expected) {
+      localFailed = 1;
+      std::cerr << "[NVSHMEM P0] MPI rank " << session.mpiRank()
+                << " PE " << sourcePe << " entry " << i
+                << " got " << gatheredHost(i)
+                << " expected " << expected << "\n";
+      break;
+    }
   }
-  return anyFailure == 0 ? 0 : 1;
+
+  // Do not free symmetric source memory until every PE's get has completed.
+  nvshmem_barrier_all();
+  nvshmem_free(symmetricPointer);
+
+  int globalFailed = 0;
+  checkMpi(MPI_Allreduce(&localFailed, &globalFailed, 1, MPI_INT, MPI_MAX,
+                          session.comm()), "MPI_Allreduce(result)");
+  std::cout << "[NVSHMEM P0] rank=" << session.mpiRank()
+            << " pe=" << session.pe()
+            << " sourcePe=" << sourcePe
+            << " localLength=" << length
+            << " paddedLength=" << maxLength
+            << " sampledElements=" << sampleCount
+            << " status=" << (localFailed ? "FAIL" : "PASS") << std::endl;
+  if (session.mpiRank() == 0) {
+    std::cout << "[NVSHMEM P0] " << (globalFailed ? "FAIL" : "PASS")
+              << " (" << (session.numPes() > 1 ? "remote GPU get" : "one-PE local smoke")
+              << "; no Import benchmark yet)" << std::endl;
+  }
+  return globalFailed ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
-}  // namespace NvshmemP0
+} // namespace NvshmemP0
 
-#endif  // PERFORMANCE_CGSOLVE_NVSHMEM_P0_HPP
+#endif // TPETRA_PERFORMANCE_NVSHMEM_P0_HPP
+

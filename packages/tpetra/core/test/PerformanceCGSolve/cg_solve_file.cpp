@@ -30,6 +30,9 @@
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
 #include "NvshmemP0.hpp"
+#ifndef HAVE_TPETRA_INST_CUDA
+#error "PERFORMANCE_CGSOLVE_NVSHMEM_P0 requires a CUDA-enabled Tpetra instantiation"
+#endif
 #endif
 
 template <class CrsMatrix, class Vector>
@@ -153,7 +156,7 @@ double tol_large = 0.10;
 }  // namespace CGParams
 
 template <class Node>
-int run(bool nvshmemP0 = false) {
+int run() {
   using namespace CGParams;
   using std::cout;
   using std::endl;
@@ -210,18 +213,6 @@ int run(bool nvshmemP0 = false) {
     throw std::runtime_error("The matrix must have domain and range maps that are the same.");
   }
 
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
-  if (nvshmemP0) {
-    // P0: retain stock matrix creation; exercise a symmetric clone and one
-    // GPU-issued get, without entering CG, Import, or SpMV.
-    vec_type source(A->getDomainMap());
-    source.putScalar(static_cast<Scalar>(myRank + 1));
-    return NvshmemP0::smokeTest(source, MPI_COMM_WORLD);
-  }
-#else
-  (void)nvshmemP0;
-#endif
-
   // Either read the right-hand side b of the linear system from a
   // file, or generate it.
   RCP<const map_type> map = A->getRangeMap();
@@ -276,6 +267,34 @@ int run(bool nvshmemP0 = false) {
   return EXIT_SUCCESS;
 }
 
+
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+// Minimal P0 adapter: reuse this benchmark's stock CRS construction, but
+// intentionally do not enter CG, SpMV, or Tpetra Import for this smoke test.
+// Keeping it outside run<Node>() avoids instantiating a Kokkos::Cuda-only
+// communication kernel for non-CUDA Tpetra backends.
+int runNvshmemP0(const NvshmemP0::Session& session) {
+  using namespace CGParams;
+  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
+  using LO = Tpetra::Map<>::local_ordinal_type;
+  using GO = Tpetra::Map<>::global_ordinal_type;
+  using Matrix = Tpetra::CrsMatrix<double, LO, GO, Node>;
+  using Vector = Tpetra::Vector<double, LO, GO, Node>;
+
+  auto comm = Tpetra::getDefaultComm();
+  Teuchos::RCP<Matrix> A;
+  if (!filename.empty()) {
+    A = Tpetra::MatrixMarket::Reader<Matrix>::readSparseFile(filename, comm);
+  } else {
+    A = Tpetra::Utils::MatrixGenerator<Matrix>::generate_miniFE_matrix(nsize, comm);
+  }
+
+  Vector X(A->getDomainMap());
+  X.putScalar(static_cast<double>(session.mpiRank() + 1));
+  return NvshmemP0::smokeTest(X, session);
+}
+#endif
+
 int main(int argc, char* argv[]) {
   using namespace CGParams;
   using default_exec = Tpetra::Details::DefaultTypes::execution_space;
@@ -296,7 +315,6 @@ int main(int argc, char* argv[]) {
   const char* rawKokkosNumDevices = std::getenv("KOKKOS_NUM_DEVICES");
   if (rawKokkosNumDevices)
     numgpus = std::atoi(rawKokkosNumDevices);
-  if (numgpus < 1) numgpus = 1;
 
   bool useSYCL    = false;
   bool useHIP     = false;
@@ -304,7 +322,10 @@ int main(int argc, char* argv[]) {
   bool useOpenMP  = false;
   bool useThreads = false;
   bool useSerial  = false;
+
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
   bool nvshmemP0 = false;
+#endif
 
   Teuchos::CommandLineProcessor cmdp(false, true);
   cmdp.setOption("verbose", "quiet", &verbose, "Print messages and results.");
@@ -322,7 +343,7 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("tol_large", &tol_large, "Tolerance for individual times.");
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
   cmdp.setOption("nvshmem-p0", "no-nvshmem-p0", &nvshmemP0,
-                 "Run the NVSHMEM P0 GPU-read smoke test using the generated matrix.");
+                 "Use Kokkos::Cuda to clone into NVSHMEM and issue GPU remote gets.");
 #endif
   // Only provide the option to use Node types that are actually enabled in this build
 #ifdef HAVE_TPETRA_INST_SYCL
@@ -388,79 +409,86 @@ int main(int argc, char* argv[]) {
 #endif
   }
 
-  Kokkos::InitializationSettings kokkosArgs;
-  kokkosArgs.set_num_threads(numthreads);
-  kokkosArgs.set_device_id(myRank % numgpus);
-  kokkosArgs.set_disable_warnings(!verbose);
-
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
-  NvshmemP0::DeviceBinding binding;
-  if (nvshmemP0) {
-    // P0 uses CUDA only. Non-P0 command-line options retain their old paths.
-    if (!useCuda || useSYCL || useHIP || useOpenMP || useThreads || useSerial) {
-      if (myRank == 0) std::cerr << "--nvshmem-p0 requires --cuda only\n";
-      return EXIT_FAILURE;
+  if (nvshmemP0 && (!useCuda || useSYCL || useHIP || useOpenMP ||
+                     useThreads || useSerial)) {
+    if (myRank == 0) {
+      std::cerr << "--nvshmem-p0 requires the CUDA Tpetra backend "
+                   "(use --cuda and --numgpus=<GPUs visible per node>).\n";
     }
-    try {
-      binding = NvshmemP0::bindCudaDevice(MPI_COMM_WORLD);
-      kokkosArgs.set_device_id(binding.device);
-    } catch (const std::exception& e) {
-      std::cerr << "[NVSHMEM P0] rank " << myRank << ": " << e.what() << std::endl;
-#ifdef HAVE_MPI
-      MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-#endif
-      return EXIT_FAILURE;
-    }
+    return EXIT_FAILURE;
   }
 #endif
 
+  if (numgpus < 1) {
+    if (myRank == 0) std::cerr << "--numgpus must be at least one.\n";
+    return EXIT_FAILURE;
+  }
+
+  Kokkos::InitializationSettings kokkosArgs;
+  kokkosArgs.set_num_threads(numthreads);
+  kokkosArgs.set_disable_warnings(!verbose);
+  int deviceRank = myRank;
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+  if (nvshmemP0) {
+    // Kokkos owns CUDA device initialization. Use local MPI rank to choose
+    // a GPU when each node exposes multiple GPUs to its local ranks.
+    deviceRank = NvshmemP0::nodeLocalMpiRank(MPI_COMM_WORLD);
+  }
+#endif
+  kokkosArgs.set_device_id(deviceRank % numgpus);
+
   Kokkos::initialize(kokkosArgs);
   int status = EXIT_FAILURE;
-  {
+  try {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
-    // This scope ensures nvshmem_finalize occurs before Kokkos::finalize.
-    // Teuchos::GlobalMPISession finalizes MPI only after main returns.
-    NvshmemP0::Session nvshmemSession;
+    if (nvshmemP0) {
+      // Destroy NVSHMEM session before Kokkos::finalize and MPI_Finalize.
+      NvshmemP0::Session session(MPI_COMM_WORLD);
+      session.describe(deviceRank % numgpus);
+      status = runNvshmemP0(session);
+    } else
 #endif
-    try {
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
-      if (nvshmemP0) {
-        nvshmemSession.initialize(MPI_COMM_WORLD);
-        nvshmemSession.printConfiguration(binding);
-      }
-#endif
+    {
 #ifdef HAVE_TPETRA_INST_SYCL
-      if (useSYCL) status = run<Tpetra::KokkosCompat::KokkosSYCLWrapperNode>(nvshmemP0);
+      if (useSYCL) status = run<Tpetra::KokkosCompat::KokkosSYCLWrapperNode>();
+      else
 #endif
 #ifdef HAVE_TPETRA_INST_HIP
-      if (useHIP) status = run<Tpetra::KokkosCompat::KokkosHIPWrapperNode>(nvshmemP0);
+      if (useHIP) status = run<Tpetra::KokkosCompat::KokkosHIPWrapperNode>();
+      else
 #endif
 #ifdef HAVE_TPETRA_INST_CUDA
-      if (useCuda) status = run<Tpetra::KokkosCompat::KokkosCudaWrapperNode>(nvshmemP0);
+      if (useCuda) status = run<Tpetra::KokkosCompat::KokkosCudaWrapperNode>();
+      else
 #endif
 #ifdef HAVE_TPETRA_INST_OPENMP
-      if (useOpenMP) status = run<Tpetra::KokkosCompat::KokkosOpenMPWrapperNode>(nvshmemP0);
+      if (useOpenMP) status = run<Tpetra::KokkosCompat::KokkosOpenMPWrapperNode>();
+      else
 #endif
 #ifdef HAVE_TPETRA_INST_PTHREAD
-      if (useThreads) status = run<Tpetra::KokkosCompat::KokkosThreadsWrapperNode>(nvshmemP0);
+      if (useThreads) status = run<Tpetra::KokkosCompat::KokkosThreadsWrapperNode>();
+      else
 #endif
 #ifdef HAVE_TPETRA_INST_SERIAL
-      if (useSerial) status = run<Tpetra::KokkosCompat::KokkosSerialWrapperNode>(nvshmemP0);
+      if (useSerial) status = run<Tpetra::KokkosCompat::KokkosSerialWrapperNode>();
+      else
 #endif
-      if (status == EXIT_FAILURE && myRank == 0 && !useSYCL && !useHIP &&
-          !useCuda && !useOpenMP && !useThreads && !useSerial)
-        std::cerr << "Error: no node type was enabled. CG was not run.\n";
-    } catch (const std::exception& e) {
-      std::cerr << "PerformanceCGSolve rank " << myRank
-                << " failed: " << e.what() << std::endl;
-#ifdef HAVE_MPI
-      // A peer may still be inside a collective malloc or NVSHMEM barrier.
-      // Aborting is safer than allowing unmatched collective cleanup.
-      MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-#endif
-      status = EXIT_FAILURE;
+      {
+        if (myRank == 0)
+          std::cerr << "Error: no node type was enabled. CG was not run.\n";
+      }
     }
+  } catch (const std::exception& e) {
+    std::cerr << "PerformanceCGSolve rank " << myRank << ": "
+              << e.what() << std::endl;
+#ifdef HAVE_MPI
+    // A peer may be inside nvshmem_malloc() or another collective.
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+    status = EXIT_FAILURE;
   }
   Kokkos::finalize();
   return status;
 }
+
