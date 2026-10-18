@@ -28,10 +28,10 @@
 #include <algorithm>
 #include <functional>
 
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
 #include "NvshmemP0.hpp"
 #ifndef HAVE_TPETRA_INST_CUDA
-#error "PERFORMANCE_CGSOLVE_NVSHMEM_P0 requires a CUDA-enabled Tpetra instantiation"
+#error "PERFORMANCE_CGSOLVE_NVSHMEM requires a CUDA-enabled Tpetra instantiation"
 #endif
 #endif
 
@@ -268,7 +268,7 @@ int run() {
 }
 
 
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
 // Minimal P0 adapter: reuse this benchmark's stock CRS construction, but
 // intentionally do not enter CG, SpMV, or Tpetra Import for this smoke test.
 // Keeping it outside run<Node>() avoids instantiating a Kokkos::Cuda-only
@@ -323,7 +323,7 @@ int main(int argc, char* argv[]) {
   bool useThreads = false;
   bool useSerial  = false;
 
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   bool nvshmemP0 = false;
 #endif
 
@@ -341,7 +341,7 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("size", &nsize, "Generate miniFE matrix with X^3 elements.");
   cmdp.setOption("tol_small", &tol_small, "Tolerance for total CG-Time and final residual.");
   cmdp.setOption("tol_large", &tol_large, "Tolerance for individual times.");
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   cmdp.setOption("nvshmem-p0", "no-nvshmem-p0", &nvshmemP0,
                  "Use Kokkos::Cuda to clone into NVSHMEM and issue GPU remote gets.");
 #endif
@@ -409,7 +409,7 @@ int main(int argc, char* argv[]) {
 #endif
   }
 
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   if (nvshmemP0 && (!useCuda || useSYCL || useHIP || useOpenMP ||
                      useThreads || useSerial)) {
     if (myRank == 0) {
@@ -429,7 +429,7 @@ int main(int argc, char* argv[]) {
   kokkosArgs.set_num_threads(numthreads);
   kokkosArgs.set_disable_warnings(!verbose);
   int deviceRank = myRank;
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   if (nvshmemP0) {
     // Kokkos owns CUDA device initialization. Use local MPI rank to choose
     // a GPU when each node exposes multiple GPUs to its local ranks.
@@ -441,7 +441,7 @@ int main(int argc, char* argv[]) {
   Kokkos::initialize(kokkosArgs);
   int status = EXIT_FAILURE;
   try {
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
     if (nvshmemP0) {
       // Destroy NVSHMEM session before Kokkos::finalize and MPI_Finalize.
       NvshmemP0::Session session(MPI_COMM_WORLD);
