@@ -28,6 +28,10 @@
 #include <algorithm>
 #include <functional>
 
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+#include "NvshmemP0.hpp"
+#endif
+
 template <class CrsMatrix, class Vector>
 bool cg_solve(Teuchos::RCP<CrsMatrix> A, Teuchos::RCP<Vector> b, Teuchos::RCP<Vector> x, int myproc, double tolerance, int max_iter) {
   using Teuchos::TimeMonitor;
@@ -149,7 +153,7 @@ double tol_large = 0.10;
 }  // namespace CGParams
 
 template <class Node>
-int run() {
+int run(bool nvshmemP0 = false) {
   using namespace CGParams;
   using std::cout;
   using std::endl;
@@ -205,6 +209,18 @@ int run() {
   if (!A->getRangeMap()->isSameAs(*(A->getDomainMap()))) {
     throw std::runtime_error("The matrix must have domain and range maps that are the same.");
   }
+
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+  if (nvshmemP0) {
+    // P0: retain stock matrix creation; exercise a symmetric clone and one
+    // GPU-issued get, without entering CG, Import, or SpMV.
+    vec_type source(A->getDomainMap());
+    source.putScalar(static_cast<Scalar>(myRank + 1));
+    return NvshmemP0::smokeTest(source, MPI_COMM_WORLD);
+  }
+#else
+  (void)nvshmemP0;
+#endif
 
   // Either read the right-hand side b of the linear system from a
   // file, or generate it.
@@ -280,6 +296,7 @@ int main(int argc, char* argv[]) {
   const char* rawKokkosNumDevices = std::getenv("KOKKOS_NUM_DEVICES");
   if (rawKokkosNumDevices)
     numgpus = std::atoi(rawKokkosNumDevices);
+  if (numgpus < 1) numgpus = 1;
 
   bool useSYCL    = false;
   bool useHIP     = false;
@@ -287,6 +304,7 @@ int main(int argc, char* argv[]) {
   bool useOpenMP  = false;
   bool useThreads = false;
   bool useSerial  = false;
+  bool nvshmemP0 = false;
 
   Teuchos::CommandLineProcessor cmdp(false, true);
   cmdp.setOption("verbose", "quiet", &verbose, "Print messages and results.");
@@ -302,6 +320,10 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("size", &nsize, "Generate miniFE matrix with X^3 elements.");
   cmdp.setOption("tol_small", &tol_small, "Tolerance for total CG-Time and final residual.");
   cmdp.setOption("tol_large", &tol_large, "Tolerance for individual times.");
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+  cmdp.setOption("nvshmem-p0", "no-nvshmem-p0", &nvshmemP0,
+                 "Run the NVSHMEM P0 GPU-read smoke test using the generated matrix.");
+#endif
   // Only provide the option to use Node types that are actually enabled in this build
 #ifdef HAVE_TPETRA_INST_SYCL
   cmdp.setOption("sycl", "no-sycl", &useSYCL, "Use SYCL node");
@@ -371,35 +393,74 @@ int main(int argc, char* argv[]) {
   kokkosArgs.set_device_id(myRank % numgpus);
   kokkosArgs.set_disable_warnings(!verbose);
 
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+  NvshmemP0::DeviceBinding binding;
+  if (nvshmemP0) {
+    // P0 uses CUDA only. Non-P0 command-line options retain their old paths.
+    if (!useCuda || useSYCL || useHIP || useOpenMP || useThreads || useSerial) {
+      if (myRank == 0) std::cerr << "--nvshmem-p0 requires --cuda only\n";
+      return EXIT_FAILURE;
+    }
+    try {
+      binding = NvshmemP0::bindCudaDevice(MPI_COMM_WORLD);
+      kokkosArgs.set_device_id(binding.device);
+    } catch (const std::exception& e) {
+      std::cerr << "[NVSHMEM P0] rank " << myRank << ": " << e.what() << std::endl;
+#ifdef HAVE_MPI
+      MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+      return EXIT_FAILURE;
+    }
+  }
+#endif
+
   Kokkos::initialize(kokkosArgs);
+  int status = EXIT_FAILURE;
   {
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+    // This scope ensures nvshmem_finalize occurs before Kokkos::finalize.
+    // Teuchos::GlobalMPISession finalizes MPI only after main returns.
+    NvshmemP0::Session nvshmemSession;
+#endif
+    try {
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM_P0
+      if (nvshmemP0) {
+        nvshmemSession.initialize(MPI_COMM_WORLD);
+        nvshmemSession.printConfiguration(binding);
+      }
+#endif
 #ifdef HAVE_TPETRA_INST_SYCL
-    if (useSYCL)
-      return run<Tpetra::KokkosCompat::KokkosSYCLWrapperNode>();
+      if (useSYCL) status = run<Tpetra::KokkosCompat::KokkosSYCLWrapperNode>(nvshmemP0);
 #endif
 #ifdef HAVE_TPETRA_INST_HIP
-    if (useHIP)
-      return run<Tpetra::KokkosCompat::KokkosHIPWrapperNode>();
+      if (useHIP) status = run<Tpetra::KokkosCompat::KokkosHIPWrapperNode>(nvshmemP0);
 #endif
 #ifdef HAVE_TPETRA_INST_CUDA
-    if (useCuda)
-      return run<Tpetra::KokkosCompat::KokkosCudaWrapperNode>();
+      if (useCuda) status = run<Tpetra::KokkosCompat::KokkosCudaWrapperNode>(nvshmemP0);
 #endif
 #ifdef HAVE_TPETRA_INST_OPENMP
-    if (useOpenMP)
-      return run<Tpetra::KokkosCompat::KokkosOpenMPWrapperNode>();
+      if (useOpenMP) status = run<Tpetra::KokkosCompat::KokkosOpenMPWrapperNode>(nvshmemP0);
 #endif
 #ifdef HAVE_TPETRA_INST_PTHREAD
-    if (useThreads)
-      return run<Tpetra::KokkosCompat::KokkosThreadsWrapperNode>();
+      if (useThreads) status = run<Tpetra::KokkosCompat::KokkosThreadsWrapperNode>(nvshmemP0);
 #endif
 #ifdef HAVE_TPETRA_INST_SERIAL
-    if (useSerial)
-      return run<Tpetra::KokkosCompat::KokkosSerialWrapperNode>();
+      if (useSerial) status = run<Tpetra::KokkosCompat::KokkosSerialWrapperNode>(nvshmemP0);
 #endif
-    if (myRank == 0)
-      std::cerr << "Error: no node type was enabled. CG was not run.\n";
+      if (status == EXIT_FAILURE && myRank == 0 && !useSYCL && !useHIP &&
+          !useCuda && !useOpenMP && !useThreads && !useSerial)
+        std::cerr << "Error: no node type was enabled. CG was not run.\n";
+    } catch (const std::exception& e) {
+      std::cerr << "PerformanceCGSolve rank " << myRank
+                << " failed: " << e.what() << std::endl;
+#ifdef HAVE_MPI
+      // A peer may still be inside a collective malloc or NVSHMEM barrier.
+      // Aborting is safer than allowing unmatched collective cleanup.
+      MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+      status = EXIT_FAILURE;
+    }
   }
   Kokkos::finalize();
-  return 0;
+  return status;
 }
