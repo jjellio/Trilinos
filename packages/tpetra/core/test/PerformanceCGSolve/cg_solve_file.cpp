@@ -30,6 +30,8 @@
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
 #include "NvshmemP0.hpp"
+#include "NvshmemP1.hpp"
+#include "NvshmemP2.hpp"
 #ifndef HAVE_TPETRA_INST_CUDA
 #error "PERFORMANCE_CGSOLVE_NVSHMEM requires a CUDA-enabled Tpetra instantiation"
 #endif
@@ -293,6 +295,100 @@ int runNvshmemP0(const NvshmemP0::Session& session) {
   X.putScalar(static_cast<double>(session.mpiRank() + 1));
   return NvshmemP0::smokeTest(X, session);
 }
+// P1 uses the same stock CRS construction as P0, but performs the Tpetra
+// doImport oracle and builds/checks the read-only Import metadata plan. It
+// does not enter CG/SpMV or issue any GPU-initiated remote gets.
+int runNvshmemP1(const NvshmemP0::Session& session, bool syntheticTests) {
+  using namespace CGParams;
+  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
+  using LO = Tpetra::Map<>::local_ordinal_type;
+  using GO = Tpetra::Map<>::global_ordinal_type;
+  using Matrix = Tpetra::CrsMatrix<double, LO, GO, Node>;
+  using Map = Tpetra::Map<LO, GO, Node>;
+  using Import = Tpetra::Import<LO, GO, Node>;
+
+  auto comm = Tpetra::getDefaultComm();
+  if (comm->getRank() != session.mpiRank() ||
+      comm->getSize() != session.numPes()) {
+    throw std::runtime_error("P1 requires the same MPI rank order in the Tpetra and NVSHMEM communicators");
+  }
+  Teuchos::RCP<Matrix> A;
+  if (!filename.empty()) {
+    A = Tpetra::MatrixMarket::Reader<Matrix>::readSparseFile(filename, comm);
+  } else {
+    A = Tpetra::Utils::MatrixGenerator<Matrix>::generate_miniFE_matrix(nsize, comm);
+  }
+  if (!A->isFillComplete()) {
+    throw std::runtime_error("P1 requires a fill-complete Tpetra CrsMatrix");
+  }
+  Teuchos::RCP<const Map> domain = A->getDomainMap();
+  Teuchos::RCP<const Map> column = A->getColMap();
+  Teuchos::RCP<const Import> importer = NvshmemP1::ensureImporter(
+      domain, column, A->getGraph()->getImporter(), session.comm());
+
+  // For generated miniFE, inter-rank halo entries should be present with
+  // multiple ranks. For an arbitrary matrix file, zero communication may
+  // legitimately be the entire Import, and is explicitly supported.
+  const bool expectRemote = filename.empty() && session.numPes() > 1;
+  NvshmemP1::runCase("matrix", domain, column, importer, session, expectRemote);
+  if (syntheticTests) {
+    NvshmemP1::runSynthetic<LO, GO, Node>(NvshmemP1::SyntheticKind::Mixed, session);
+    NvshmemP1::runSynthetic<LO, GO, Node>(NvshmemP1::SyntheticKind::OneWay, session);
+    NvshmemP1::runSynthetic<LO, GO, Node>(NvshmemP1::SyntheticKind::LocalOnly, session);
+  }
+  if (session.mpiRank() == 0) {
+    std::cout << "[NVSHMEM P1] PASS (Tpetra Import oracle, verified owner/LID metadata, "
+                 "Kokkos local-only reconstruction; no standalone MPI or NVSHMEM gather)"
+              << std::endl;
+  }
+  return EXIT_SUCCESS;
+}
+// P2 keeps the same stock CrsMatrix and P1 plan, but independently packs,
+// sends, receives and places the full column-map vector using MPI.
+// CUDA-aware MPI is optional; the default GPU path explicitly stages via host.
+int runNvshmemP2(const NvshmemP0::Session& session,
+                 const NvshmemP2::Options& opts) {
+  using namespace CGParams;
+  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
+  using LO = Tpetra::Map<>::local_ordinal_type;
+  using GO = Tpetra::Map<>::global_ordinal_type;
+  using Matrix = Tpetra::CrsMatrix<double, LO, GO, Node>;
+  using Map = Tpetra::Map<LO, GO, Node>;
+  using Import = Tpetra::Import<LO, GO, Node>;
+
+  NvshmemP2::checkOptions(opts);
+  auto comm = Tpetra::getDefaultComm();
+  if (comm->getRank() != session.mpiRank() ||
+      comm->getSize() != session.numPes())
+    throw std::runtime_error("P2 requires matching MPI rank order for Tpetra/NVSHMEM");
+  Teuchos::RCP<Matrix> A;
+  if (!filename.empty()) {
+    A = Tpetra::MatrixMarket::Reader<Matrix>::readSparseFile(filename, comm);
+  } else {
+    A = Tpetra::Utils::MatrixGenerator<Matrix>::generate_miniFE_matrix(nsize, comm);
+  }
+  if (!A->isFillComplete())
+    throw std::runtime_error("P2 requires a fill-complete stock CrsMatrix");
+
+  Teuchos::RCP<const Map> domain = A->getDomainMap();
+  Teuchos::RCP<const Map> column = A->getColMap();
+  Teuchos::RCP<const Import> importer = NvshmemP1::ensureImporter(
+      domain, column, A->getGraph()->getImporter(), session.comm());
+  const bool requireRemote = filename.empty() && session.numPes() > 1;
+  NvshmemP2::runCase("matrix", domain, column, importer, session,
+                     opts, requireRemote, true);
+  if (opts.runSynthetic) {
+    NvshmemP2::runSynthetic<LO, GO, Node>(NvshmemP2::SyntheticKind::Mixed, session, opts);
+    NvshmemP2::runSynthetic<LO, GO, Node>(NvshmemP2::SyntheticKind::OneWay, session, opts);
+    NvshmemP2::runSynthetic<LO, GO, Node>(NvshmemP2::SyntheticKind::LocalOnly, session, opts);
+    NvshmemP2::runSynthetic<LO, GO, Node>(NvshmemP2::SyntheticKind::Interleaved, session, opts);
+  }
+  if (session.mpiRank() == 0)
+    std::cout << "[NVSHMEM P2] PASS (complete host and Kokkos-packed standalone MPI imports; "
+                 "two source epochs; exact Tpetra doImport comparison; no NVSHMEM gather)"
+              << std::endl;
+  return EXIT_SUCCESS;
+}
 #endif
 
 int main(int argc, char* argv[]) {
@@ -325,6 +421,10 @@ int main(int argc, char* argv[]) {
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   bool nvshmemP0 = false;
+  bool nvshmemP1 = false;
+  bool nvshmemP1Synthetic = true;
+  bool nvshmemP2 = false;
+  NvshmemP2::Options nvshmemP2Options;
 #endif
 
   Teuchos::CommandLineProcessor cmdp(false, true);
@@ -344,6 +444,25 @@ int main(int argc, char* argv[]) {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   cmdp.setOption("nvshmem-p0", "no-nvshmem-p0", &nvshmemP0,
                  "Use Kokkos::Cuda to clone into NVSHMEM and issue GPU remote gets.");
+  cmdp.setOption("nvshmem-p1", "no-nvshmem-p1", &nvshmemP1,
+                 "Validate the Tpetra Import oracle and rank/LID plan (no remote gets).");
+  cmdp.setOption("nvshmem-p1-synthetic", "no-nvshmem-p1-synthetic", &nvshmemP1Synthetic,
+                 "Also run tiny noncontiguous/permuted, one-way, and local-only Map cases.");
+  cmdp.setOption("nvshmem-p2", "no-nvshmem-p2", &nvshmemP2,
+                 "Standalone host/CUDA pack and MPI Import against Tpetra doImport.");
+  cmdp.setOption("nvshmem-p2-synthetic", "no-nvshmem-p2-synthetic",
+                 &nvshmemP2Options.runSynthetic,
+                 "Exercise mixed, one-way, local-only and interleaved synthetic Maps.");
+  cmdp.setOption("nvshmem-p2-gpu-aware-mpi", "no-nvshmem-p2-gpu-aware-mpi",
+                 &nvshmemP2Options.gpuAwareMpi,
+                 "ALSO test direct MPI with CUDA pointers (requires known CUDA-aware MPI).");
+  cmdp.setOption("nvshmem-p2-dump-exports", "no-nvshmem-p2-dump-exports",
+                 &nvshmemP2Options.dumpExports,
+                 "Print the complete ordered sequence (exportPID,exportLID) on every rank.");
+  cmdp.setOption("nvshmem-p2-warmup", &nvshmemP2Options.warmup,
+                 "Warmup repetitions for the matrix P2 timing paths (default 2).");
+  cmdp.setOption("nvshmem-p2-repetitions", &nvshmemP2Options.repetitions,
+                 "Measured repetitions for the matrix P2 timing paths (default 10).");
 #endif
   // Only provide the option to use Node types that are actually enabled in this build
 #ifdef HAVE_TPETRA_INST_SYCL
@@ -410,10 +529,17 @@ int main(int argc, char* argv[]) {
   }
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  if (nvshmemP0 && (!useCuda || useSYCL || useHIP || useOpenMP ||
-                     useThreads || useSerial)) {
+  if (static_cast<int>(nvshmemP0) + static_cast<int>(nvshmemP1) +
+          static_cast<int>(nvshmemP2) > 1) {
+    if (myRank == 0)
+      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1 and --nvshmem-p2.\n";
+    return EXIT_FAILURE;
+  }
+  if ((nvshmemP0 || nvshmemP1 || nvshmemP2) &&
+      (!useCuda || useSYCL || useHIP || useOpenMP ||
+       useThreads || useSerial)) {
     if (myRank == 0) {
-      std::cerr << "--nvshmem-p0 requires the CUDA Tpetra backend "
+      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2 require the CUDA Tpetra backend "
                    "(use --cuda and --numgpus=<GPUs visible per node>).\n";
     }
     return EXIT_FAILURE;
@@ -430,7 +556,7 @@ int main(int argc, char* argv[]) {
   kokkosArgs.set_disable_warnings(!verbose);
   int deviceRank = myRank;
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  if (nvshmemP0) {
+  if (nvshmemP0 || nvshmemP1 || nvshmemP2) {
     // Kokkos owns CUDA device initialization. Use local MPI rank to choose
     // a GPU when each node exposes multiple GPUs to its local ranks.
     deviceRank = NvshmemP0::nodeLocalMpiRank(MPI_COMM_WORLD);
@@ -442,11 +568,13 @@ int main(int argc, char* argv[]) {
   int status = EXIT_FAILURE;
   try {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-    if (nvshmemP0) {
+    if (nvshmemP0 || nvshmemP1 || nvshmemP2) {
       // Destroy NVSHMEM session before Kokkos::finalize and MPI_Finalize.
       NvshmemP0::Session session(MPI_COMM_WORLD);
       session.describe(deviceRank % numgpus);
-      status = runNvshmemP0(session);
+      if (nvshmemP0) status = runNvshmemP0(session);
+      else if (nvshmemP1) status = runNvshmemP1(session, nvshmemP1Synthetic);
+      else status = runNvshmemP2(session, nvshmemP2Options);
     } else
 #endif
     {
@@ -491,4 +619,3 @@ int main(int argc, char* argv[]) {
   Kokkos::finalize();
   return status;
 }
-

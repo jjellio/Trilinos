@@ -5,7 +5,7 @@ TRIBITS_SET_AND_INC_DIRS(DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Isolated experiment. OFF preserves the ordinary Trilinos test target.
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM
-  "Enable Kokkos::Cuda-based NVSHMEM P0 smoke test in Performance-CGSolve"
+  "Enable opt-in NVSHMEM P0 / metadata P1 / standalone MPI P2 in Performance-CGSolve"
   OFF)
 
 IF(PERFORMANCE_CGSOLVE_NVSHMEM)
@@ -37,7 +37,7 @@ IF(Tpetra_INST_DOUBLE)
     SET(_cg_target ${PACKAGE_NAME}_Performance-CGSolve)
     TARGET_COMPILE_DEFINITIONS(${_cg_target} PRIVATE
       PERFORMANCE_CGSOLVE_NVSHMEM)
-    MESSAGE(STATUS "Tpetra: NVSHMEM P0 Kokkos-only smoke enabled")
+    MESSAGE(STATUS "Tpetra: NVSHMEM P0/P1/P2 experiments enabled")
   ENDIF()
 
   SET(COUNTER 1)
@@ -83,4 +83,3 @@ IF(Tpetra_INST_DOUBLE)
   ENDIF()
 
 ENDIF()
-

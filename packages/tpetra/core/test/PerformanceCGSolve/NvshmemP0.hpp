@@ -107,7 +107,6 @@ class Session {
       }
     }
     checkMpi(MPI_Barrier(comm_), "MPI_Barrier(P0 diagnostics completion)");
-    if (rank_ == 0) Kokkos::print_configuration(std::cout);
   }
 
   MPI_Comm comm() const { return comm_; }
