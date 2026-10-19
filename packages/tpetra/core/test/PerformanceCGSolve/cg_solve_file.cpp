@@ -32,6 +32,7 @@
 #include "NvshmemP0.hpp"
 #include "NvshmemP1.hpp"
 #include "NvshmemP2.hpp"
+#include "NvshmemP3.hpp"
 #ifndef HAVE_TPETRA_INST_CUDA
 #error "PERFORMANCE_CGSOLVE_NVSHMEM requires a CUDA-enabled Tpetra instantiation"
 #endif
@@ -389,6 +390,56 @@ int runNvshmemP2(const NvshmemP0::Session& session,
               << std::endl;
   return EXIT_SUCCESS;
 }
+// P3: independently gather the full column-map Vector with NVSHMEM scalar
+// device gets. The unmodified P2 Distributor replica remains a second oracle.
+int runNvshmemP3(const NvshmemP0::Session& session,
+                 const NvshmemP3::Options& opts) {
+  using namespace CGParams;
+  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
+  using LO = Tpetra::Map<>::local_ordinal_type;
+  using GO = Tpetra::Map<>::global_ordinal_type;
+  using Matrix = Tpetra::CrsMatrix<double, LO, GO, Node>;
+  using Map = Tpetra::Map<LO, GO, Node>;
+  using Import = Tpetra::Import<LO, GO, Node>;
+
+  NvshmemP3::checkOptions(opts);
+  auto comm = Tpetra::getDefaultComm();
+  if (comm->getRank() != session.mpiRank() ||
+      comm->getSize() != session.numPes())
+    throw std::runtime_error("P3 requires identical MPI rank ordering for Tpetra/NVSHMEM");
+
+  Teuchos::RCP<Matrix> A;
+  if (!filename.empty()) {
+    A = Tpetra::MatrixMarket::Reader<Matrix>::readSparseFile(filename, comm);
+  } else {
+    A = Tpetra::Utils::MatrixGenerator<Matrix>::generate_miniFE_matrix(nsize, comm);
+  }
+  if (!A->isFillComplete())
+    throw std::runtime_error("P3 requires a fill-complete stock CrsMatrix");
+  Teuchos::RCP<const Map> domain = A->getDomainMap();
+  Teuchos::RCP<const Map> column = A->getColMap();
+  Teuchos::RCP<const Import> importer = NvshmemP1::ensureImporter(
+      domain, column, A->getGraph()->getImporter(), session.comm());
+
+  const bool needRemote = filename.empty() && session.numPes() > 1;
+  NvshmemP3::runCase("matrix", domain, column, importer, session,
+                     opts, needRemote, true);
+  if (opts.runSynthetic) {
+    NvshmemP3::runSynthetic<LO, GO, Node>(
+        NvshmemP3::SyntheticKind::Mixed, session, opts);
+    NvshmemP3::runSynthetic<LO, GO, Node>(
+        NvshmemP3::SyntheticKind::OneWay, session, opts);
+    NvshmemP3::runSynthetic<LO, GO, Node>(
+        NvshmemP3::SyntheticKind::LocalOnly, session, opts);
+    NvshmemP3::runSynthetic<LO, GO, Node>(
+        NvshmemP3::SyntheticKind::Interleaved, session, opts);
+  }
+  if (session.mpiRank() == 0)
+    std::cout << "[NVSHMEM P3] PASS (full-column CUDA NVSHMEM scalar gets; "
+                 "Tpetra and P2 exact comparisons; no NVSHMEM allocation passed to MPI)"
+              << std::endl;
+  return EXIT_SUCCESS;
+}
 #endif
 
 int main(int argc, char* argv[]) {
@@ -425,6 +476,8 @@ int main(int argc, char* argv[]) {
   bool nvshmemP1Synthetic = true;
   bool nvshmemP2 = false;
   NvshmemP2::Options nvshmemP2Options;
+  bool nvshmemP3 = false;
+  NvshmemP3::Options nvshmemP3Options;
 #endif
 
   Teuchos::CommandLineProcessor cmdp(false, true);
@@ -463,6 +516,21 @@ int main(int argc, char* argv[]) {
                  "Warmup repetitions for the matrix P2 timing paths (default 2).");
   cmdp.setOption("nvshmem-p2-repetitions", &nvshmemP2Options.repetitions,
                  "Measured repetitions for the matrix P2 timing paths (default 10).");
+#endif
+
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
+  cmdp.setOption("nvshmem-p3", "no-nvshmem-p3", &nvshmemP3,
+                 "GPU-initiated NVSHMEM scalar-gather Import; compare to Tpetra and P2.");
+  cmdp.setOption("nvshmem-p3-synthetic", "no-nvshmem-p3-synthetic",
+                 &nvshmemP3Options.runSynthetic,
+                 "Also validate all four P3 synthetic Map cases.");
+  cmdp.setOption("nvshmem-p3-baselines", "no-nvshmem-p3-baselines",
+                 &nvshmemP3Options.benchmarkBaselines,
+                 "Time stock Tpetra and P2 Distributor again in the P3 matrix run.");
+  cmdp.setOption("nvshmem-p3-warmup", &nvshmemP3Options.warmup,
+                 "Warmup repetitions for the prepared-symmetric P3 gather.");
+  cmdp.setOption("nvshmem-p3-repetitions", &nvshmemP3Options.repetitions,
+                 "Measured repetitions for the prepared-symmetric P3 gather.");
 #endif
   // Only provide the option to use Node types that are actually enabled in this build
 #ifdef HAVE_TPETRA_INST_SYCL
@@ -530,16 +598,16 @@ int main(int argc, char* argv[]) {
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   if (static_cast<int>(nvshmemP0) + static_cast<int>(nvshmemP1) +
-          static_cast<int>(nvshmemP2) > 1) {
+          static_cast<int>(nvshmemP2) + static_cast<int>(nvshmemP3) > 1) {
     if (myRank == 0)
-      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1 and --nvshmem-p2.\n";
+      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1, --nvshmem-p2 or --nvshmem-p3.\n";
     return EXIT_FAILURE;
   }
-  if ((nvshmemP0 || nvshmemP1 || nvshmemP2) &&
+  if ((nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3) &&
       (!useCuda || useSYCL || useHIP || useOpenMP ||
        useThreads || useSerial)) {
     if (myRank == 0) {
-      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2 require the CUDA Tpetra backend "
+      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2/--nvshmem-p3 require the CUDA Tpetra backend "
                    "(use --cuda and --numgpus=<GPUs visible per node>).\n";
     }
     return EXIT_FAILURE;
@@ -556,7 +624,7 @@ int main(int argc, char* argv[]) {
   kokkosArgs.set_disable_warnings(!verbose);
   int deviceRank = myRank;
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  if (nvshmemP0 || nvshmemP1 || nvshmemP2) {
+  if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3) {
     // Kokkos owns CUDA device initialization. Use local MPI rank to choose
     // a GPU when each node exposes multiple GPUs to its local ranks.
     deviceRank = NvshmemP0::nodeLocalMpiRank(MPI_COMM_WORLD);
@@ -568,13 +636,14 @@ int main(int argc, char* argv[]) {
   int status = EXIT_FAILURE;
   try {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-    if (nvshmemP0 || nvshmemP1 || nvshmemP2) {
+    if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3) {
       // Destroy NVSHMEM session before Kokkos::finalize and MPI_Finalize.
       NvshmemP0::Session session(MPI_COMM_WORLD);
       session.describe(deviceRank % numgpus);
       if (nvshmemP0) status = runNvshmemP0(session);
       else if (nvshmemP1) status = runNvshmemP1(session, nvshmemP1Synthetic);
-      else status = runNvshmemP2(session, nvshmemP2Options);
+      else if (nvshmemP2) status = runNvshmemP2(session, nvshmemP2Options);
+      else status = runNvshmemP3(session, nvshmemP3Options);
     } else
 #endif
     {
