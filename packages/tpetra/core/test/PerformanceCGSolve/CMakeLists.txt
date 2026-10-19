@@ -5,8 +5,19 @@ TRIBITS_SET_AND_INC_DIRS(DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Isolated experiment. OFF preserves the ordinary Trilinos test target.
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM
-  "Enable opt-in NVSHMEM P0 / metadata P1 / standalone MPI P2 in Performance-CGSolve"
+  "Enable opt-in NVSHMEM P0-P4 Import experiments in Performance-CGSolve"
   OFF)
+
+# Hardware-dependent CTest registration is opt-in. Ordinary Trilinos builds
+# must not assume that a CUDA GPU or NVSHMEM fabric is available.
+OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P4_CTEST
+  "Register single-PE P4 correctness smoke test (needs a CUDA GPU/NVSHMEM runtime)"
+  OFF)
+
+IF(PERFORMANCE_CGSOLVE_NVSHMEM_P4_CTEST AND NOT PERFORMANCE_CGSOLVE_NVSHMEM)
+  MESSAGE(FATAL_ERROR
+    "PERFORMANCE_CGSOLVE_NVSHMEM_P4_CTEST requires PERFORMANCE_CGSOLVE_NVSHMEM=ON")
+ENDIF()
 
 IF(PERFORMANCE_CGSOLVE_NVSHMEM)
   IF(NOT Tpetra_ENABLE_CUDA OR NOT Tpetra_INST_DOUBLE)
@@ -37,7 +48,19 @@ IF(Tpetra_INST_DOUBLE)
     SET(_cg_target ${PACKAGE_NAME}_Performance-CGSolve)
     TARGET_COMPILE_DEFINITIONS(${_cg_target} PRIVATE
       PERFORMANCE_CGSOLVE_NVSHMEM)
-    MESSAGE(STATUS "Tpetra: NVSHMEM P0/P1/P2 experiments enabled")
+    MESSAGE(STATUS "Tpetra: NVSHMEM P0-P4 experiments enabled")
+  ENDIF()
+
+  IF(PERFORMANCE_CGSOLVE_NVSHMEM_P4_CTEST)
+    TRIBITS_ADD_TEST(
+      Performance-CGSolve
+      NAME P4_Correctness_Smoke_1PE
+      ARGS "--nvshmem-p4 --size=8 --nvshmem-p4-epochs=2 --nvshmem-p4-cycles=2 --nvshmem-p4-max-nodes=1"
+      COMM mpi
+      NUM_MPI_PROCS 1
+      RUN_SERIAL
+      CATEGORIES BASIC
+    )
   ENDIF()
 
   SET(COUNTER 1)

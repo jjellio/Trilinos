@@ -106,8 +106,20 @@ ImportGatherPlan<LO, GO, Node> buildImportGatherPlan(
     for (int pe : peForRank) check(pe >= 0 && pe < nRanks, "invalid NVSHMEM PE");
   }
 
-  // Both Map tests are collective, as is Map::getRemoteIndexList below.
-  check(domainMap->isOneToOne(), "source domain Map is not one-to-one");
+  // An empty global source Map has no GIDs that could have duplicate
+  // owners.  Some Tpetra Directory implementations nevertheless report
+  // isOneToOne() == false for an all-empty, locally replicated Map.
+  // Only exempt *globally* empty Maps: a rank with zero local elements in
+  // a nonempty global Map must still pass the normal one-to-one check.
+  // The empty target check also rules out requests for nonexistent GIDs.
+  // Map::isOneToOne and the nonempty directory lookup may be collective.
+  const bool globallyEmptySource = (domainMap->getGlobalNumElements() == 0);
+  if (globallyEmptySource) {
+    check(colMap->getGlobalNumElements() == 0,
+          "globally empty source Map has nonempty target Map");
+  } else {
+    check(domainMap->isOneToOne(), "source domain Map is not one-to-one");
+  }
   check(importer.getSourceMap()->isSameAs(*domainMap),
         "Importer source Map differs from domain Map");
   check(importer.getTargetMap()->isSameAs(*colMap),
