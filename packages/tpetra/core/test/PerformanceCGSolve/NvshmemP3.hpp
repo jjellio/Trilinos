@@ -53,6 +53,7 @@ inline void mpiCheck(int error, const char* operation) {
 struct Options {
   bool runSynthetic = true;
   bool benchmarkBaselines = true;
+  bool dumpPeerStats = false;  // setup diagnostics; no effect on timed regions
   int warmup = 2;
   int repetitions = 10;
 };
@@ -363,6 +364,90 @@ void measurePrepared(const std::string& name, const Options& opts,
   std::cout.precision(precision);
 }
 
+// Collect the actual P1 Importer remote descriptors into a directed
+// receiver-rank x source-rank table. The reported volume is unique remote
+// *column-Map values* (one 8-byte scalar per element), NOT matrix nonzeros
+// or InfiniBand wire overhead. This is setup diagnostics, outside timers.
+// The hostnames come from the actual MPI processes, not guessed rank layout.
+template<class LO, class GO, class Node>
+void dumpPeerStats(const std::string& caseName,
+                   const ImportGatherP1::ImportGatherPlan<LO, GO, Node>& plan,
+                   const Teuchos::RCP<const Tpetra::Map<LO, GO, Node>>& column,
+                   const NvshmemP0::Session& session) {
+  const int nRanks = session.numPes();
+  const int me = session.mpiRank();
+  check(nRanks > 0, "invalid MPI rank count in P3 peer diagnostics");
+  std::vector<unsigned long long> fromOwner(static_cast<std::size_t>(nRanks), 0ULL);
+  for (const auto& e : plan.remote) {
+    check(e.ownerRank >= 0 && e.ownerRank < nRanks, "invalid peer in P3 descriptors");
+    ++fromOwner[static_cast<std::size_t>(e.ownerRank)];
+  }
+
+  std::vector<unsigned long long> matrix(
+      static_cast<std::size_t>(nRanks) * static_cast<std::size_t>(nRanks), 0ULL);
+  mpiCheck(MPI_Allgather(fromOwner.data(), nRanks, MPI_UNSIGNED_LONG_LONG,
+                         matrix.data(), nRanks, MPI_UNSIGNED_LONG_LONG, session.comm()),
+           "MPI_Allgather(P3 actual receiver/source peer matrix)");
+
+  char myHostname[MPI_MAX_PROCESSOR_NAME] = {};
+  int hostnameLength = 0;
+  mpiCheck(MPI_Get_processor_name(myHostname, &hostnameLength),
+           "MPI_Get_processor_name(P3 peer diagnostics)");
+  std::vector<char> allHostnames(
+      static_cast<std::size_t>(nRanks) * MPI_MAX_PROCESSOR_NAME, '\0');
+  mpiCheck(MPI_Allgather(myHostname, MPI_MAX_PROCESSOR_NAME, MPI_CHAR,
+                         allHostnames.data(), MPI_MAX_PROCESSOR_NAME, MPI_CHAR,
+                         session.comm()),
+           "MPI_Allgather(P3 peer hostnames)");
+
+  // If any nonadjacent rank requests values from rank zero, print the actual
+  // GID/source-LID here. This diagnoses the extra 15 values in the size-100
+  // result without assuming what produced those references.
+  for (const auto& e : plan.remote) {
+    if (e.ownerRank == 0 && me > 1) {
+      std::cout << "[NVSHMEM P3 PEER GID] case=" << caseName
+                << " receiver=" << me << " source=0"
+                << " gid=" << column->getGlobalElement(static_cast<LO>(e.destinationLid))
+                << " sourceLID=" << e.sourceLid
+                << " destinationLID=" << e.destinationLid << "\n";
+    }
+  }
+  if (me != 0) return;
+
+  unsigned long long total = 0, sameNode = 0, otherNode = 0;
+  std::size_t nonzeroPairs = 0;
+  std::cout << "[NVSHMEM P3 PEER MATRIX] case=" << caseName
+            << " receiver=rows source=columns unit=doubles source=data=P1_remote_descriptors\n";
+  for (int dst = 0; dst < nRanks; ++dst) {
+    const std::string dstHost(
+        &allHostnames[static_cast<std::size_t>(dst) * MPI_MAX_PROCESSOR_NAME]);
+    for (int src = 0; src < nRanks; ++src) {
+      const auto n = matrix[static_cast<std::size_t>(dst) * nRanks + src];
+      if (n == 0) continue;
+      const std::string srcHost(
+          &allHostnames[static_cast<std::size_t>(src) * MPI_MAX_PROCESSOR_NAME]);
+      const bool localNode = dstHost == srcHost;
+      ++nonzeroPairs;
+      total += n;
+      if (localNode) sameNode += n;
+      else otherNode += n;
+      std::cout << "[NVSHMEM P3 PEER] case=" << caseName
+                << " source=" << src << " receiver=" << dst
+                << " doubles=" << n << " bytes=" << (n * sizeof(double))
+                << " locality=" << (localNode ? "same-node" : "cross-node")
+                << " sourceHost=" << srcHost << " receiverHost=" << dstHost << "\n";
+    }
+  }
+  std::cout << "[NVSHMEM P3 PEER TOTAL] case=" << caseName
+            << " remoteDoubles=" << total
+            << " packedPayloadBytes=" << (total * sizeof(double))
+            << " directedPairs=" << nonzeroPairs
+            << " sameNodeDoubles=" << sameNode
+            << " crossNodeDoubles=" << otherNode
+            << " sameNodeBytes=" << (sameNode * sizeof(double))
+            << " crossNodeBytes=" << (otherNode * sizeof(double)) << "\n";
+}
+
 template<class LO, class GO, class Node>
 void runCase(const std::string& name,
              const Teuchos::RCP<const Tpetra::Map<LO, GO, Node>>& domain,
@@ -411,6 +496,8 @@ void runCase(const std::string& name,
                          MPI_SUM, session.comm()), "MPI_Allreduce(P3 counts)");
   check(global[0] == global[1], name + ": total remote/export counts differ");
   check(!requireRemote || global[0] > 0, name + ": expected remote entries");
+  if (opts.dumpPeerStats && benchmark)
+    dumpPeerStats(name, plan, column, session);
 
   std::cout << "[NVSHMEM P3] case=" << name
             << " rank=" << session.mpiRank()

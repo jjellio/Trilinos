@@ -34,6 +34,7 @@
 #include "NvshmemP2.hpp"
 #include "NvshmemP3.hpp"
 #include "NvshmemP4.hpp"
+#include "NvshmemP50.hpp"
 #ifndef HAVE_TPETRA_INST_CUDA
 #error "PERFORMANCE_CGSOLVE_NVSHMEM requires a CUDA-enabled Tpetra instantiation"
 #endif
@@ -454,6 +455,17 @@ int runNvshmemP4(const NvshmemP0::Session& session,
   NvshmemP4::run<LO, GO, Node>(session, opts, nsize, filename);
   return EXIT_SUCCESS;
 }
+// P5.0: read-only map/plan analysis; no NVSHMEM gets, MPI vector payload,
+// or timed kernels. P0-P4 remain selectable and unchanged.
+int runNvshmemP50(const NvshmemP0::Session& session,
+                  const NvshmemP50::Options& opts) {
+  using namespace CGParams;
+  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
+  using LO = Tpetra::Map<>::local_ordinal_type;
+  using GO = Tpetra::Map<>::global_ordinal_type;
+  NvshmemP50::run<LO, GO, Node>(session, opts, nsize, filename);
+  return EXIT_SUCCESS;
+}
 #endif
 
 int main(int argc, char* argv[]) {
@@ -494,6 +506,8 @@ int main(int argc, char* argv[]) {
   NvshmemP3::Options nvshmemP3Options;
   bool nvshmemP4 = false;
   NvshmemP4::Options nvshmemP4Options;
+  bool nvshmemP50 = false;
+  NvshmemP50::Options nvshmemP50Options;
 #endif
 
   Teuchos::CommandLineProcessor cmdp(false, true);
@@ -543,6 +557,9 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("nvshmem-p3-baselines", "no-nvshmem-p3-baselines",
                  &nvshmemP3Options.benchmarkBaselines,
                  "Time stock Tpetra and P2 Distributor again in the P3 matrix run.");
+  cmdp.setOption("nvshmem-p3-peer-stats", "no-nvshmem-p3-peer-stats",
+                 &nvshmemP3Options.dumpPeerStats,
+                 "Dump the actual rank-to-rank P1 remote counts, bytes, hostnames and nonadjacent GIDs.");
   cmdp.setOption("nvshmem-p3-warmup", &nvshmemP3Options.warmup,
                  "Warmup repetitions for the prepared-symmetric P3 gather.");
   cmdp.setOption("nvshmem-p3-repetitions", &nvshmemP3Options.repetitions,
@@ -567,6 +584,19 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("nvshmem-p4-negative", "no-nvshmem-p4-negative",
                  &nvshmemP4Options.negativeChecks,
                  "Check that invalid P3 local and remote descriptors are rejected safely.");
+#endif
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
+  cmdp.setOption("nvshmem-p50", "no-nvshmem-p50", &nvshmemP50,
+                 "P5.0 only: inspect Import contiguity, peer groups and potential bulk transfers.");
+  cmdp.setOption("nvshmem-p50-case", &nvshmemP50Options.only,
+                 "all|matrix|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
+  cmdp.setOption("nvshmem-p50-peers", "no-nvshmem-p50-peers", &nvshmemP50Options.showPeers,
+                 "Print ordered per-source-PE statistics.");
+  cmdp.setOption("nvshmem-p50-outgoing", "no-nvshmem-p50-outgoing",
+                 &nvshmemP50Options.showOutgoing,
+                 "Print per-destination-rank export/fanout statistics.");
+  cmdp.setOption("nvshmem-p50-csv-prefix", &nvshmemP50Options.csvPrefix,
+                 "Optional output prefix for rank/recv/send/global CSV files on MPI rank zero.");
 #endif
   // Only provide the option to use Node types that are actually enabled in this build
 #ifdef HAVE_TPETRA_INST_SYCL
@@ -635,16 +665,16 @@ int main(int argc, char* argv[]) {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   if (static_cast<int>(nvshmemP0) + static_cast<int>(nvshmemP1) +
           static_cast<int>(nvshmemP2) + static_cast<int>(nvshmemP3) +
-          static_cast<int>(nvshmemP4) > 1) {
+          static_cast<int>(nvshmemP4) + static_cast<int>(nvshmemP50) > 1) {
     if (myRank == 0)
-      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1, --nvshmem-p2, --nvshmem-p3 or --nvshmem-p4.\n";
+      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1, --nvshmem-p2, --nvshmem-p3, --nvshmem-p4 or --nvshmem-p50.\n";
     return EXIT_FAILURE;
   }
-  if ((nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4) &&
+  if ((nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50) &&
       (!useCuda || useSYCL || useHIP || useOpenMP ||
        useThreads || useSerial)) {
     if (myRank == 0) {
-      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2/--nvshmem-p3/--nvshmem-p4 require the CUDA Tpetra backend "
+      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2/--nvshmem-p3/--nvshmem-p4/--nvshmem-p50 require the CUDA Tpetra backend "
                    "(use --cuda and --numgpus=<GPUs visible per node>).\n";
     }
     return EXIT_FAILURE;
@@ -661,7 +691,7 @@ int main(int argc, char* argv[]) {
   kokkosArgs.set_disable_warnings(!verbose);
   int deviceRank = myRank;
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4) {
+  if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50) {
     // Kokkos owns CUDA device initialization. Use local MPI rank to choose
     // a GPU when each node exposes multiple GPUs to its local ranks.
     deviceRank = NvshmemP0::nodeLocalMpiRank(MPI_COMM_WORLD);
@@ -673,7 +703,7 @@ int main(int argc, char* argv[]) {
   int status = EXIT_FAILURE;
   try {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-    if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4) {
+    if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50) {
       // Destroy NVSHMEM session before Kokkos::finalize and MPI_Finalize.
       NvshmemP0::Session session(MPI_COMM_WORLD);
       session.describe(deviceRank % numgpus);
@@ -681,7 +711,8 @@ int main(int argc, char* argv[]) {
       else if (nvshmemP1) status = runNvshmemP1(session, nvshmemP1Synthetic);
       else if (nvshmemP2) status = runNvshmemP2(session, nvshmemP2Options);
       else if (nvshmemP3) status = runNvshmemP3(session, nvshmemP3Options);
-      else status = runNvshmemP4(session, nvshmemP4Options);
+      else if (nvshmemP4) status = runNvshmemP4(session, nvshmemP4Options);
+      else status = runNvshmemP50(session, nvshmemP50Options);
     } else
 #endif
     {
