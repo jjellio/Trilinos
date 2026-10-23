@@ -35,6 +35,7 @@
 #include "NvshmemP3.hpp"
 #include "NvshmemP4.hpp"
 #include "NvshmemP50.hpp"
+#include "NvshmemP51.hpp"
 #ifndef HAVE_TPETRA_INST_CUDA
 #error "PERFORMANCE_CGSOLVE_NVSHMEM requires a CUDA-enabled Tpetra instantiation"
 #endif
@@ -466,6 +467,16 @@ int runNvshmemP50(const NvshmemP0::Session& session,
   NvshmemP50::run<LO, GO, Node>(session, opts, nsize, filename);
   return EXIT_SUCCESS;
 }
+// P5.1: metadata-only sender-packed PUT plan; payload begins in P5.2.
+int runNvshmemP51(const NvshmemP0::Session& session,
+                  const NvshmemP51::Options& opts) {
+  using namespace CGParams;
+  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
+  using LO = Tpetra::Map<>::local_ordinal_type;
+  using GO = Tpetra::Map<>::global_ordinal_type;
+  NvshmemP51::run<LO, GO, Node>(session, opts, nsize, filename);
+  return EXIT_SUCCESS;
+}
 #endif
 
 int main(int argc, char* argv[]) {
@@ -508,6 +519,8 @@ int main(int argc, char* argv[]) {
   NvshmemP4::Options nvshmemP4Options;
   bool nvshmemP50 = false;
   NvshmemP50::Options nvshmemP50Options;
+  bool nvshmemP51 = false;
+  NvshmemP51::Options nvshmemP51Options;
 #endif
 
   Teuchos::CommandLineProcessor cmdp(false, true);
@@ -598,6 +611,21 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("nvshmem-p50-csv-prefix", &nvshmemP50Options.csvPrefix,
                  "Optional output prefix for rank/recv/send/global CSV files on MPI rank zero.");
 #endif
+#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
+  cmdp.setOption("nvshmem-p51", "no-nvshmem-p51", &nvshmemP51,
+                 "P5.1 only: build/verify packed-PUT sender, inbox, signal and unpack plans.");
+  cmdp.setOption("nvshmem-p51-case", &nvshmemP51Options.only,
+                 "all|matrix|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
+  cmdp.setOption("nvshmem-p51-peers", "no-nvshmem-p51-peers", &nvshmemP51Options.showPeers,
+                 "Print every peer's packed send / disjoint inbox layout.");
+  cmdp.setOption("nvshmem-p51-min-nodes", &nvshmemP51Options.minimumNodes,
+                 "Require at least this many distinct physical nodes (default 1).");
+  cmdp.setOption("nvshmem-p51-max-nodes", &nvshmemP51Options.maximumNodes,
+                 "Require no more than this many physical nodes (0 means unlimited).");
+  cmdp.setOption("nvshmem-p51-cross-node", "no-nvshmem-p51-cross-node",
+                 &nvshmemP51Options.requireCrossNode,
+                 "Require at least one packet planned across distinct physical nodes.");
+#endif
   // Only provide the option to use Node types that are actually enabled in this build
 #ifdef HAVE_TPETRA_INST_SYCL
   cmdp.setOption("sycl", "no-sycl", &useSYCL, "Use SYCL node");
@@ -665,16 +693,17 @@ int main(int argc, char* argv[]) {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
   if (static_cast<int>(nvshmemP0) + static_cast<int>(nvshmemP1) +
           static_cast<int>(nvshmemP2) + static_cast<int>(nvshmemP3) +
-          static_cast<int>(nvshmemP4) + static_cast<int>(nvshmemP50) > 1) {
+          static_cast<int>(nvshmemP4) + static_cast<int>(nvshmemP50) +
+          static_cast<int>(nvshmemP51) > 1) {
     if (myRank == 0)
-      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1, --nvshmem-p2, --nvshmem-p3, --nvshmem-p4 or --nvshmem-p50.\n";
+      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1, --nvshmem-p2, --nvshmem-p3, --nvshmem-p4, --nvshmem-p50 or --nvshmem-p51.\n";
     return EXIT_FAILURE;
   }
-  if ((nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50) &&
+  if ((nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51) &&
       (!useCuda || useSYCL || useHIP || useOpenMP ||
        useThreads || useSerial)) {
     if (myRank == 0) {
-      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2/--nvshmem-p3/--nvshmem-p4/--nvshmem-p50 require the CUDA Tpetra backend "
+      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2/--nvshmem-p3/--nvshmem-p4/--nvshmem-p50/--nvshmem-p51 require the CUDA Tpetra backend "
                    "(use --cuda and --numgpus=<GPUs visible per node>).\n";
     }
     return EXIT_FAILURE;
@@ -691,7 +720,7 @@ int main(int argc, char* argv[]) {
   kokkosArgs.set_disable_warnings(!verbose);
   int deviceRank = myRank;
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50) {
+  if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51) {
     // Kokkos owns CUDA device initialization. Use local MPI rank to choose
     // a GPU when each node exposes multiple GPUs to its local ranks.
     deviceRank = NvshmemP0::nodeLocalMpiRank(MPI_COMM_WORLD);
@@ -703,7 +732,7 @@ int main(int argc, char* argv[]) {
   int status = EXIT_FAILURE;
   try {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-    if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50) {
+    if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51) {
       // Destroy NVSHMEM session before Kokkos::finalize and MPI_Finalize.
       NvshmemP0::Session session(MPI_COMM_WORLD);
       session.describe(deviceRank % numgpus);
@@ -712,7 +741,8 @@ int main(int argc, char* argv[]) {
       else if (nvshmemP2) status = runNvshmemP2(session, nvshmemP2Options);
       else if (nvshmemP3) status = runNvshmemP3(session, nvshmemP3Options);
       else if (nvshmemP4) status = runNvshmemP4(session, nvshmemP4Options);
-      else status = runNvshmemP50(session, nvshmemP50Options);
+      else if (nvshmemP50) status = runNvshmemP50(session, nvshmemP50Options);
+      else status = runNvshmemP51(session, nvshmemP51Options);
     } else
 #endif
     {
