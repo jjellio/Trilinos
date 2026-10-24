@@ -5,7 +5,7 @@ TRIBITS_SET_AND_INC_DIRS(DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Isolated experiment. OFF preserves the ordinary Trilinos test target.
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM
-  "Enable opt-in NVSHMEM P0-P5.1 Import experiments in Performance-CGSolve"
+  "Enable opt-in NVSHMEM P0-P5.2 Import experiments in Performance-CGSolve"
   OFF)
 
 # Hardware-dependent CTest registration is opt-in. Ordinary Trilinos builds
@@ -16,6 +16,13 @@ OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P4_CTEST
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P51_CTEST
   "Register single-PE P5.1 plan-only smoke test (needs a CUDA GPU/NVSHMEM initialization)"
   OFF)
+OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P52_CTEST
+  "Register single-PE P5.2 point-to-point PUT+signal correctness smoke (CUDA/NVSHMEM)"
+  OFF)
+IF(PERFORMANCE_CGSOLVE_NVSHMEM_P52_CTEST AND NOT PERFORMANCE_CGSOLVE_NVSHMEM)
+  MESSAGE(FATAL_ERROR
+    "PERFORMANCE_CGSOLVE_NVSHMEM_P52_CTEST requires PERFORMANCE_CGSOLVE_NVSHMEM=ON")
+ENDIF()
 
 IF(PERFORMANCE_CGSOLVE_NVSHMEM_P51_CTEST AND NOT PERFORMANCE_CGSOLVE_NVSHMEM)
   MESSAGE(FATAL_ERROR
@@ -56,7 +63,7 @@ IF(Tpetra_INST_DOUBLE)
     SET(_cg_target ${PACKAGE_NAME}_Performance-CGSolve)
     TARGET_COMPILE_DEFINITIONS(${_cg_target} PRIVATE
       PERFORMANCE_CGSOLVE_NVSHMEM)
-    MESSAGE(STATUS "Tpetra: NVSHMEM P0-P5.1 experiments enabled")
+    MESSAGE(STATUS "Tpetra: NVSHMEM P0-P5.2 experiments enabled")
   ENDIF()
 
   IF(PERFORMANCE_CGSOLVE_NVSHMEM_P4_CTEST)
@@ -76,6 +83,18 @@ IF(Tpetra_INST_DOUBLE)
       Performance-CGSolve
       NAME P51_PackedPutPlan_Smoke_1PE
       ARGS "--nvshmem-p51 --size=8 --nvshmem-p51-max-nodes=1"
+      COMM mpi
+      NUM_MPI_PROCS 1
+      RUN_SERIAL
+      CATEGORIES BASIC
+    )
+  ENDIF()
+
+  IF(PERFORMANCE_CGSOLVE_NVSHMEM_P52_CTEST)
+    TRIBITS_ADD_TEST(
+      Performance-CGSolve
+      NAME P52_PeerCreditPut_Smoke_1PE
+      ARGS "--nvshmem-p52 --size=8 --nvshmem-p52-epochs=4 --nvshmem-p52-cycles=2 --nvshmem-p52-max-nodes=1"
       COMM mpi
       NUM_MPI_PROCS 1
       RUN_SERIAL

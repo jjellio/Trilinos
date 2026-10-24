@@ -1,8 +1,11 @@
-// P5.1 deterministic CPU-only plan tests: no MPI, Trilinos, CUDA or NVSHMEM.
+// P5.1 plan plus P5.2 asynchronously scheduled per-peer credit protocol model.
+// CPU-only (no MPI, Trilinos, CUDA or NVSHMEM): hardware acceptance still required.
 #include "PackedPutPlan.hpp"
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -75,6 +78,180 @@ U64 expectedValue(int ownerRank, U64 sourceLid) {
   return static_cast<U64>(ownerRank + 1) * 1000000ULL + sourceLid;
 }
 
+// Non-collective simulation of the exact P5.2 ready/consumed protocol. Rank
+// schedules are independently and adversarially interleaved. A sender waits
+// only for the destinations to which it exports, and a receiver only for its
+// actual source PEs. A PE with no traffic may run arbitrarily far ahead.
+// Per-slot stamps catch premature overwrite; stale-generation checks catch
+// accepting a previous PUT as the next epoch; full owner/LID comparison
+// catches packet ordering and incorrect remote/local scatter.
+inline double changingValue(int epoch, int owner, U64 lid) {
+  const U64 integer = static_cast<U64>(epoch + 1) * 100000000ULL +
+                      static_cast<U64>(owner + 1) * 10000ULL + lid;
+  const double magnitude = static_cast<double>(integer) * 0.125;
+  return ((static_cast<U64>(epoch) + owner + lid) & 1ULL) ? -magnitude : magnitude;
+}
+
+struct SimRank {
+  int epoch = 1;              // 1..8, corresponds to one allocation lifetime
+  int phase = 0;              // wait credit, pack, send, wait ready, unpack, ACK
+  std::vector<double> packed;
+  std::vector<double> output;
+};
+
+void exerciseCreditProtocol(const Trial& trial) {
+  const std::size_t n = trial.localPlans.size();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  // Two independent collective malloc/free cycles; both zero signal arrays.
+  for (int cycle = 0; cycle < 2; ++cycle) {
+    const int maxEpoch = 4;
+    std::vector<SimRank> states(n);
+    std::vector<std::vector<double>> inbox(n);
+    std::vector<std::vector<int>> writeStamp(n), readStamp(n);
+    // Here the rank->PE table is deliberately permuted by the test generator.
+    std::vector<std::vector<int>> ready(n, std::vector<int>(n, 0));
+    std::vector<std::vector<int>> credit(n, std::vector<int>(n, 0));
+    for (std::size_t rank = 0; rank < n; ++rank) {
+      const auto& plan = trial.localPlans[rank];
+      inbox[rank].assign(asSize(plan.symmetricInboxElements, "model inbox"), nan);
+      writeStamp[rank].assign(asSize(plan.inboxElements, "model stamp"), 0);
+      readStamp[rank].assign(asSize(plan.inboxElements, "model stamp"), 0);
+    }
+    std::mt19937_64 schedule(0x52A11C0EDULL + n * 33 + cycle * 97 +
+                             trial.inputs[0].targetLength);
+    const std::size_t maxSteps = n * static_cast<std::size_t>(maxEpoch) * 6 + 5;
+    std::size_t completed = 0;
+    std::size_t scheduled = 0;
+    while (completed != n) {
+      verify(scheduled <= maxSteps, "P5.2 credit/ready deadlock or infinite loop");
+      std::vector<std::size_t> runnable;
+      for (std::size_t rank = 0; rank < n; ++rank) {
+        auto& state = states[rank];
+        if (state.epoch > maxEpoch) continue;
+        const auto& plan = trial.localPlans[rank];
+        if (state.phase == 0 && state.epoch > 1) {
+          bool creditsReady = true;
+          for (const auto& send : plan.sendPeers)
+            creditsReady &= (credit[rank][static_cast<std::size_t>(send.pe)] ==
+                             state.epoch - 1);
+          if (!creditsReady) continue;
+        }
+        if (state.phase == 3) {
+          bool packetsReady = true;
+          for (const auto& recv : plan.receivePeers)
+            packetsReady &= (ready[rank][static_cast<std::size_t>(recv.pe)] ==
+                             state.epoch);
+          if (!packetsReady) continue;
+        }
+        runnable.push_back(rank);
+      }
+      verify(!runnable.empty(), "P5.2 model cyclic wait / no runnable rank");
+      const auto rank = runnable[static_cast<std::size_t>(schedule() % runnable.size())];
+      auto& state = states[rank];
+      const auto& plan = trial.localPlans[rank];
+      const int generation = state.epoch;
+      const int patternEpoch = cycle * maxEpoch + generation - 1;
+      switch (state.phase) {
+        case 0: // credit waited ONLY for send peers, not all ranks
+          if (generation > 1)
+            for (const auto& send : plan.sendPeers)
+              verify(credit[rank][static_cast<std::size_t>(send.pe)] == generation - 1,
+                     "sender advanced without receiver-consumed ACK");
+          state.phase = 1;
+          break;
+        case 1: // ordinary X -> symmetric sender scratch
+          state.packed.assign(asSize(plan.packElements, "model pack"), nan);
+          for (std::size_t i = 0; i < state.packed.size(); ++i)
+            state.packed[i] = changingValue(patternEpoch, static_cast<int>(rank),
+                                          plan.packedSourceLids[i]);
+          state.phase = 2;
+          break;
+        case 2: // PUT+signal to each actual destination PE
+          for (const auto& send : plan.sendPeers) {
+            auto& receiver = trial.localPlans[static_cast<std::size_t>(send.rank)];
+            verify(receiver.pe == send.pe, "P5.2 bad destination PE mapping");
+            for (U64 j = 0; j < send.count; ++j) {
+              const std::size_t dst = static_cast<std::size_t>(send.remoteInboxOffset + j);
+              const std::size_t src = static_cast<std::size_t>(send.packOffset + j);
+              verify(dst < receiver.inboxElements && src < state.packed.size(),
+                     "P5.2 simulated PUT outside logical packet");
+              // Never overwrite an inbox slot the receiver still needs.
+              verify(readStamp[static_cast<std::size_t>(send.rank)][dst] ==
+                         generation - 1,
+                     "P5.2 PUT overwrote inbox before reader acknowledgment");
+              verify(writeStamp[static_cast<std::size_t>(send.rank)][dst] ==
+                         generation - 1,
+                     "P5.2 duplicated or out-of-order packet PUT");
+              inbox[static_cast<std::size_t>(send.rank)][dst] = state.packed[src];
+              writeStamp[static_cast<std::size_t>(send.rank)][dst] = generation;
+            }
+            const std::size_t sourcePe = static_cast<std::size_t>(plan.pe);
+            verify(ready[static_cast<std::size_t>(send.rank)][sourcePe] ==
+                       generation - 1,
+                   "P5.2 ready signal updated out of order");
+            ready[static_cast<std::size_t>(send.rank)][sourcePe] = generation;
+          }
+          state.phase = 3;
+          break;
+        case 3: // expect ready[sourcePE] == generation for each inbound source
+          for (const auto& recv : plan.receivePeers)
+            verify(ready[rank][static_cast<std::size_t>(recv.pe)] == generation,
+                   "P5.2 stale/missing completion signal accepted");
+          state.phase = 4;
+          break;
+        case 4: // all packet-to-column scatters and local copies
+          state.output.assign(asSize(plan.targetLength, "model target"), nan);
+          for (std::size_t slot = 0; slot < plan.unpackDestinationLids.size(); ++slot) {
+            verify(writeStamp[rank][slot] == generation,
+                   "P5.2 inbox read before matching PUT+signal");
+            const std::size_t dst = asSize(plan.unpackDestinationLids[slot], "target LID");
+            state.output[dst] = inbox[rank][slot];
+            readStamp[rank][slot] = generation;
+          }
+          for (const auto& local : plan.local)
+            state.output[asSize(local.destinationLid, "local target")] =
+                changingValue(patternEpoch, static_cast<int>(rank), local.sourceLid);
+          for (const auto& local : plan.local)
+            verify(state.output[asSize(local.destinationLid, "local target")] ==
+                       changingValue(patternEpoch, static_cast<int>(rank), local.sourceLid),
+                   "P5.2 wrong local owner/source LID");
+          for (const auto& remote : plan.expectedRemote)
+            verify(state.output[asSize(remote.destinationLid, "remote target")] ==
+                       changingValue(patternEpoch, remote.ownerRank, remote.sourceLid),
+                   "P5.2 wrong remote owner/source LID");
+          for (const double v : state.output)
+            verify(std::isfinite(v), "P5.2 target retained unwritten sentinel");
+          state.phase = 5;
+          break;
+        case 5: // GPU signal_op(credit + selfPE, g, sourcePE), AFTER scatter
+          for (const auto& recv : plan.receivePeers) {
+            const std::size_t source = static_cast<std::size_t>(recv.rank);
+            const std::size_t receiverPe = static_cast<std::size_t>(plan.pe);
+            verify(credit[source][receiverPe] == generation - 1,
+                   "P5.2 duplicate/stale consumed ACK");
+            credit[source][receiverPe] = generation;
+          }
+          ++state.epoch;
+          state.phase = 0;
+          if (state.epoch > maxEpoch) ++completed;
+          break;
+        default: throw std::runtime_error("P5.2 invalid model scheduling phase");
+      }
+      ++scheduled;
+    }
+    verify(scheduled == n * static_cast<std::size_t>(maxEpoch) * 6,
+           "P5.2 model lost rank/phase tasks");
+    for (std::size_t receiver = 0; receiver < n; ++receiver)
+      for (const auto& recv : trial.localPlans[receiver].receivePeers) {
+        verify(ready[receiver][static_cast<std::size_t>(recv.pe)] == maxEpoch,
+               "P5.2 final ready generation missing");
+        verify(credit[static_cast<std::size_t>(recv.rank)][
+                   static_cast<std::size_t>(trial.localPlans[receiver].pe)] == maxEpoch,
+               "P5.2 final consumed acknowledgment missing");
+      }
+  }
+}
+
 void finishAndCheck(Trial t) {
   const std::size_t n = t.localPlans.size();
   U64 globalSend = 0, globalReceive = 0;
@@ -132,6 +309,7 @@ void finishAndCheck(Trial t) {
     }
     expectError([&] { finalizeLocal(p, t.metadata[rank]); }, "double finalize");
   }
+  exerciseCreditProtocol(t);
   verify(globalSend == globalReceive && sendPeers == receivePeers,
          "global message/element counts do not balance");
 }
@@ -282,6 +460,8 @@ int main() {
     expectError([&] { auto p = t.localPlans[0]; finalizeLocal(p, overflow); },
                 "overflow of symmetric allocation size");
   }
-  std::cout << "P5.1 packed PUT plan: PASS (all-empty, one-way, zero-owner, "
-               "PE permutation, randomized 1/2/3/4/8/16 ranks, corrupt metadata)\n";
+  std::cout << "P5.1 plan + P5.2 asynchronous per-peer credit PUT model: PASS "
+               "(900 randomized layouts, 1/2/3/4/8/16 ranks, 2 allocation cycles, "
+               "4 changed-value epochs per cycle, adversarial rank scheduling, "
+               "PE permutations, zero/one-way and corrupt metadata)\n";
 }
