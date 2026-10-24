@@ -41,6 +41,48 @@ inline void cudaCheck(cudaError_t code, const char* what) {
 
 using U64 = PackedPutP51::U64;
 
+// NVSHMEM's GPU RMA/signal operations are __device__ APIs. KOKKOS_LAMBDA
+// expands to a __host__ __device__ operator(), which nvcc cannot compile
+// when that operator directly calls a device-only API. Keep ONLY these two
+// point-to-point communication operations in native device-only kernels.
+// Neither kernel performs an NVSHMEM wait or collective; ordinary <<<>>>
+// launches are correct and do NOT require nvshmemx_collective_launch.
+//
+// The static P5.1 descriptors already live in ordinary Kokkos::CudaSpace.
+// Each send peer owns a disjoint destination inbox segment and ready slot.
+static __global__ void packedPutSignalKernel(
+    const PackedPutP51::SendPeer* sends, std::size_t nSend,
+    double* remoteInbox, const double* packed, U64* remoteReady, U64 generation) {
+  const std::size_t tid =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t stride =
+      static_cast<std::size_t>(blockDim.x) * gridDim.x;
+  for (std::size_t i = tid; i < nSend; i += stride) {
+    const PackedPutP51::SendPeer e = sends[i];
+    nvshmem_double_put_signal(
+        remoteInbox + e.remoteInboxOffset, packed + e.packOffset,
+        static_cast<std::size_t>(e.count), remoteReady + e.remoteSignalIndex,
+        generation, NVSHMEM_SIGNAL_SET, e.pe);
+  }
+}
+
+// One remote writer per credit slot; SET needs neither CAS nor a lock.
+// This kernel only publishes acknowledgments after unpackCuda() has
+// finished all local inbox reads.
+static __global__ void acknowledgeConsumedKernel(
+    const PackedPutP51::ReceivePeer* receives, std::size_t nRecv,
+    U64* remoteCredits, U64 receiverPe, U64 generation) {
+  const std::size_t tid =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t stride =
+      static_cast<std::size_t>(blockDim.x) * gridDim.x;
+  for (std::size_t i = tid; i < nRecv; i += stride) {
+    const PackedPutP51::ReceivePeer e = receives[i];
+    nvshmemx_signal_op(remoteCredits + receiverPe, generation,
+                       NVSHMEM_SIGNAL_SET, e.pe);
+  }
+}
+
 struct Counters {
   U64 imports = 0;
   U64 packLaunches = 0;
@@ -58,8 +100,8 @@ struct Counters {
 };
 
 // Persistent source/destination Maps and exact per-peer layout are reused
-// across imports. All CUDA launch methods are public: nvcc's KOKKOS_LAMBDA
-// extended lambdas must not be enclosed inside private member functions.
+// across imports. GPU-only NVSHMEM operations run in the device-only kernels
+// above. Remaining Kokkos CUDA lambdas use only ordinary CUDA load/stores.
 //
 // ready_[source PE]: receiver-owned slot written by PUT_SIGNAL on source.
 // credit_[dest PE]: sender-owned slot written by receiver ACK on source.
@@ -213,22 +255,19 @@ class Exchange {
 
   void issuePutsCuda(U64 generation) const {
     if (nSend_ == 0) return;
-    const auto sends = sendDevice_;
-    double* const inbox = inbox_;
-    const double* const packed = packed_;
-    U64* const ready = ready_;
-    Kokkos::parallel_for("P5.2 GPU PUT+signal per actual destination PE",
-      Kokkos::RangePolicy<Kokkos::Cuda, Kokkos::IndexType<std::size_t>>(0, nSend_),
-      KOKKOS_LAMBDA(const std::size_t i) {
-        const Send e = sends(i);
-        nvshmem_double_put_signal(
-            inbox + e.remoteInboxOffset, packed + e.packOffset,
-            static_cast<std::size_t>(e.count), ready + e.remoteSignalIndex,
-            generation, NVSHMEM_SIGNAL_SET, e.pe);
-      });
-    // The blocking put_signal API makes sender scratch safe to reuse when
-    // each issuing thread returns. Fence the *local* CUDA kernel only.
-    Kokkos::fence("P5.2 all local GPU PUT+signal calls finished");
+    constexpr unsigned int threads = 128;
+    const unsigned int blocks = static_cast<unsigned int>(
+        (nSend_ + threads - 1) / threads);
+    // Device-only kernel: KOKKOS_LAMBDA cannot call nvshmem_double_put_signal.
+    // This is NOT an NVSHMEM collective launch. Only ranks with sends launch.
+    packedPutSignalKernel<<<blocks, threads, 0, 0>>>(
+        sendDevice_.data(), nSend_, inbox_, packed_, ready_, generation);
+    cudaCheck(cudaGetLastError(), "P5.2 launch per-peer GPU PUT+signal");
+    // A local CUDA completion, not a global rendezvous. The blocking PUT
+    // call has finished reading its scratch packet on return; receivers
+    // independently wait for their own 'ready' signal to observe delivery.
+    cudaCheck(cudaStreamSynchronize(0),
+              "P5.2 all local GPU PUT+signal calls finished");
   }
 
   // NVSHMEMx host-issued on-stream wait is the documented alternative to a
@@ -285,16 +324,16 @@ class Exchange {
   // credit_[receiver PE], so an atomic SET suffices; no CAS/spinlock.
   void acknowledgeCuda(U64 generation) const {
     if (nRecv_ == 0) return;
-    const auto receives = recvDevice_;
-    U64* const credits = credit_;
-    const U64 self = static_cast<U64>(session_.pe());
-    Kokkos::parallel_for("P5.2 GPU per-source consumed generation ACK",
-      Kokkos::RangePolicy<Kokkos::Cuda, Kokkos::IndexType<std::size_t>>(0, nRecv_),
-      KOKKOS_LAMBDA(const std::size_t i) {
-        const Receive e = receives(i);
-        nvshmemx_signal_op(credits + self, generation, NVSHMEM_SIGNAL_SET, e.pe);
-      });
-    Kokkos::fence("P5.2 receiver ACK operations locally issued");
+    constexpr unsigned int threads = 128;
+    const unsigned int blocks = static_cast<unsigned int>(
+        (nRecv_ + threads - 1) / threads);
+    // Device-only kernel: nvshmemx_signal_op is also __device__ only.
+    acknowledgeConsumedKernel<<<blocks, threads, 0, 0>>>(
+        recvDevice_.data(), nRecv_, credit_,
+        static_cast<U64>(session_.pe()), generation);
+    cudaCheck(cudaGetLastError(), "P5.2 launch consumed-generation ACK");
+    cudaCheck(cudaStreamSynchronize(0),
+              "P5.2 receiver ACK operations locally issued");
   }
 
   // There are ZERO world collectives in this function. Only peer waits can

@@ -6,19 +6,19 @@ TRIBITS_SET_AND_INC_DIRS(DIR ${CMAKE_CURRENT_SOURCE_DIR})
 # Isolated experiment. OFF preserves the ordinary Trilinos test target.
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM
   "Enable opt-in NVSHMEM P0-P5.2 Import experiments in Performance-CGSolve"
-  OFF)
+  ON)
 
 # Hardware-dependent CTest registration is opt-in. Ordinary Trilinos builds
 # must not assume that a CUDA GPU or NVSHMEM fabric is available.
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P4_CTEST
   "Register single-PE P4 correctness smoke test (needs a CUDA GPU/NVSHMEM runtime)"
-  OFF)
+  ON)
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P51_CTEST
   "Register single-PE P5.1 plan-only smoke test (needs a CUDA GPU/NVSHMEM initialization)"
-  OFF)
+  ON)
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P52_CTEST
   "Register single-PE P5.2 point-to-point PUT+signal correctness smoke (CUDA/NVSHMEM)"
-  OFF)
+  ON)
 IF(PERFORMANCE_CGSOLVE_NVSHMEM_P52_CTEST AND NOT PERFORMANCE_CGSOLVE_NVSHMEM)
   MESSAGE(FATAL_ERROR
     "PERFORMANCE_CGSOLVE_NVSHMEM_P52_CTEST requires PERFORMANCE_CGSOLVE_NVSHMEM=ON")
@@ -145,3 +145,17 @@ IF(Tpetra_INST_DOUBLE)
   ENDIF()
 
 ENDIF()
+
+# Complete P5.2 GPU/cluster correctness sweep. The earlier P5.2 CTest smoke
+# covers only one PE. This opt-in suite controls MPI placement with a single
+# mpirun per CTest case and thus must NOT be nested inside TRIBITS_ADD_TEST's
+# own MPI launcher. Only enable the two-node battery in a real two-node job.
+  IF(NOT PERFORMANCE_CGSOLVE_NVSHMEM OR NOT Tpetra_INST_DOUBLE)
+    MESSAGE(FATAL_ERROR
+      "P5.2 sweep requires PERFORMANCE_CGSOLVE_NVSHMEM=ON and Tpetra double")
+  ENDIF()
+  IF(NOT TARGET ${PACKAGE_NAME}_Performance-CGSolve)
+    MESSAGE(FATAL_ERROR "P5.2 CTest sweep requires the Performance-CGSolve target")
+  ENDIF()
+  # P52_CTestSweep.cmake obtains this target's actual generated binary path.
+  INCLUDE("${CMAKE_CURRENT_SOURCE_DIR}/P52_CTestSweep.cmake")
