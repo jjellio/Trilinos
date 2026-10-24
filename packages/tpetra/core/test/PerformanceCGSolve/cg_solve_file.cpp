@@ -660,6 +660,17 @@ int main(int argc, char* argv[]) {
                  "Require at least one actual GPU PUT across physical nodes.");
   cmdp.setOption("nvshmem-p52-skew-ms", &nvshmemP52Options.skewMillis,
                  "Delay rank 0 before its first PUT Import, testing signals arriving without a resident receive kernel.");
+  cmdp.setOption("nvshmem-p52-stress-only", "no-nvshmem-p52-stress-only",
+                 &nvshmemP52Options.stressOnly,
+                 "P5.2.1: repeated NVSHMEM Imports with NO MPI/Tpetra/P2 reference calls between epochs.");
+  cmdp.setOption("nvshmem-p52-stress-entry-ms", &nvshmemP52Options.stressEntryDelayMs,
+                 "Deterministic independent per-rank entry delays (0..1000 ms).");
+  cmdp.setOption("nvshmem-p52-stress-ack-ms", &nvshmemP52Options.stressAckDelayMs,
+                 "Deterministic receiver delay AFTER inbox unpack but BEFORE peer ACK (0..1000 ms).");
+  cmdp.setOption("nvshmem-p52-stress-verify-every", &nvshmemP52Options.stressVerifyEvery,
+                 "Full host owner/LID value verification stride (default every Import).");
+  cmdp.setOption("nvshmem-p52-stress-seed", &nvshmemP52Options.stressSeed,
+                 "Deterministic per-PE independent skew/ACK delay seed.");
 #endif
   // Only provide the option to use Node types that are actually enabled in this build
 #ifdef HAVE_TPETRA_INST_SYCL

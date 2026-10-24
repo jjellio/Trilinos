@@ -14,7 +14,8 @@
 
 #include "NvshmemP4.hpp"           // all ten accepted Map layouts and owner/LID encoding
 #include "PackedPutPlanMpi.hpp"    // one-time P5.1 host-only metadata setup
-#include "NvshmemPackedPut.hpp"   // RMA-only, no MPI within import()
+#include "NvshmemPackedPut.hpp"
+#include "NvshmemP521Stress.hpp"   // RMA-only, no MPI within import()
 
 #include <algorithm>
 #include <chrono>
@@ -48,6 +49,11 @@ struct Options {
   int maximumNodes = 0;
   bool requireCrossNode = false;
   int skewMillis = 0;  // deliberately delay rank 0 before its first PUT Import
+  bool stressOnly = false;
+  int stressEntryDelayMs = 3;
+  int stressAckDelayMs = 5;
+  int stressVerifyEvery = 1;
+  int stressSeed = 17;
 };
 inline void checkOptions(const Options& o) {
   const auto& cases = NvshmemP4::cases();
@@ -61,6 +67,14 @@ inline void checkOptions(const Options& o) {
           "invalid --nvshmem-p52-min-nodes/max-nodes");
   require(o.skewMillis >= 0 && o.skewMillis <= 3000,
           "--nvshmem-p52-skew-ms must be [0,3000]");
+  if (o.stressOnly) {
+    NvshmemP521::Config cfg;
+    cfg.epochs = o.epochs; cfg.cycles = o.cycles;
+    cfg.entryDelayMs = o.stressEntryDelayMs;
+    cfg.ackDelayMs = o.stressAckDelayMs;
+    cfg.checkEvery = o.stressVerifyEvery; cfg.seed = o.stressSeed;
+    NvshmemP521::checkConfig(cfg);
+  }
 }
 
 struct Suite {
@@ -193,6 +207,90 @@ void runCase(const std::string& name,
                 << " count=" << r.count << " inboxOffset=" << r.inboxOffset
                 << " readySlot=" << r.localSignalIndex
                 << " remoteCreditSlot=" << session.pe() << '\n';
+  }
+
+  if (opts.stressOnly) {
+    // The setup metadata above may use MPI. The next operation sequence has
+    // ZERO MPI calls between its consecutive Import invocations. Stock
+    // Tpetra and P2 reference exchanges are deliberately NEVER constructed.
+    NvshmemP521::Config cfg;
+    cfg.epochs = opts.epochs;
+    cfg.cycles = opts.cycles;
+    cfg.entryDelayMs = opts.stressEntryDelayMs;
+    cfg.ackDelayMs = opts.stressAckDelayMs;
+    cfg.checkEvery = opts.stressVerifyEvery;
+    cfg.seed = opts.stressSeed;
+    const auto local = NvshmemP521::runStressCase<LO, GO, Node>(
+        name, domain, column, plan, session, cfg);
+    const U64 localCounts[9] = {
+        local.putCalls, local.putElements, local.readyWaits, local.creditWaits,
+        local.ackSignals, local.checkedValues, local.checkedEpochs,
+        local.injectedEntryDelays, local.injectedAckDelays};
+    U64 globalCounts[9] = {};
+    // This is ONLY post-stress reporting, after all repeated Imports and
+    // symmetric buffer retirement. It does not pace any Import generation.
+    mpiCheck(MPI_Allreduce(localCounts, globalCounts, 9, MPI_UINT64_T,
+                           MPI_SUM, session.comm()),
+             "P5.2.1 completed-stress report");
+    const U64 nEpochs = static_cast<U64>(cfg.epochs) * cfg.cycles;
+    U64 checkedPerCycle = 0;
+    for (int i = 0; i < cfg.epochs; ++i)
+      if (i % cfg.checkEvery == 0 || i + 1 == cfg.epochs) ++checkedPerCycle;
+    require(globalCounts[0] == globalPlan[2] * nEpochs &&
+            globalCounts[1] == globalPlan[0] * nEpochs &&
+            globalCounts[2] == globalPlan[3] * nEpochs &&
+            globalCounts[4] == globalCounts[2] &&
+            globalCounts[3] == globalPlan[2] *
+                               static_cast<U64>(cfg.cycles * (cfg.epochs - 1)) &&
+            globalCounts[6] == checkedPerCycle * static_cast<U64>(cfg.cycles) *
+                               static_cast<U64>(session.numPes()),
+            name + ": stress packet/verification counters disagree");
+    const U64 localDelay[2] = {local.creditWaitNanos, local.maxCreditWaitNanos};
+    U64 delaySums[2] = {};
+    U64 delayMax[2] = {};
+    mpiCheck(MPI_Allreduce(localDelay, delaySums, 2, MPI_UINT64_T,
+                           MPI_SUM, session.comm()),
+             "P5.2.1 credit-wait sums");
+    mpiCheck(MPI_Allreduce(localDelay, delayMax, 2, MPI_UINT64_T,
+                           MPI_MAX, session.comm()),
+             "P5.2.1 largest credit-wait duration");
+    const U64 localCross[2] = {
+        crossCalls * nEpochs, crossElements * nEpochs};
+    U64 globalCross[2] = {};
+    mpiCheck(MPI_Allreduce(localCross, globalCross, 2, MPI_UINT64_T,
+                           MPI_SUM, session.comm()),
+             "P5.2.1 post-stress cross-node packet accounting");
+    suite.putCalls += globalCounts[0];
+    suite.putElements += globalCounts[1];
+    suite.readyWaits += globalCounts[2];
+    suite.creditWaits += globalCounts[3];
+    suite.ackSignals += globalCounts[4];
+    suite.crossNodePutCalls += globalCross[0];
+    suite.crossNodePutElements += globalCross[1];
+    ++suite.passed;
+    if (session.mpiRank() == 0)
+      std::cout << "[NVSHMEM P5.2.1 CASE] case=" << name
+                << " status=PASS mode=NVSHMEM_ONLY_NO_INTERLEAVED_MPI"
+                << " ranks=" << session.numPes()
+                << " epochs=" << cfg.epochs << " cycles=" << cfg.cycles
+                << " peerPutsPerEpoch=" << globalPlan[2]
+                << " gpuPutCalls=" << globalCounts[0]
+                << " gpuPutElements=" << globalCounts[1]
+                << " readyStreamWaits=" << globalCounts[2]
+                << " creditStreamWaits=" << globalCounts[3]
+                << " gpuAckSignals=" << globalCounts[4]
+                << " checkedValues=" << globalCounts[5]
+                << " checkedEpochs=" << globalCounts[6]
+                << " entryDelayEvents=" << globalCounts[7]
+                << " ackDelayEvents=" << globalCounts[8]
+                << " totalCreditWaitUs=" << (delaySums[0] / 1000)
+                << " maxCreditWaitUs=" << (delayMax[1] / 1000)
+                << " crossNodePutCalls=" << globalCross[0]
+                << " symmetricBytesPerPE=" << local.symmetricBytesPerPE
+                << " globalSyncsInImport=0"
+                << " referenceMpiPerEpoch=0"
+                << " performanceMeasured=NO\n";
+    return;
   }
 
   const int totalEpochs = opts.epochs * opts.cycles;

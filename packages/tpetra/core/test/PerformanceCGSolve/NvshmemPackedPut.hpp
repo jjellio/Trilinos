@@ -23,6 +23,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
+#include <thread>
+#include <algorithm>
 #include <exception>
 #include <limits>
 #include <stdexcept>
@@ -96,6 +99,8 @@ struct Counters {
   U64 creditWaits = 0;      // one stream wait per outgoing peer AFTER first Import
   U64 ackSignals = 0;       // one GPU-initiated signal_op per incoming peer
   U64 localElements = 0;
+  U64 creditWaitNanos = 0; // measured local stream-wait wall time
+  U64 maxCreditWaitNanos = 0;
   U64 globalSyncsInImport = 0; // invariant: zero (not an estimated cost)
 };
 
@@ -226,14 +231,25 @@ class Exchange {
   // Consumer credits: only outgoing peer relationships matter. This is
   // point-to-point credit control, not a barrier or a collective launch.
   // Each producer finished all sends for g-1 before returning its Import.
-  void waitPreviousCredits(U64 previous) const {
+  void waitPreviousCredits(U64 previous) {
     if (previous == 0 || nSend_ == 0) return;
     const cudaStream_t stream = 0;
+    // Include both NVSHMEMx wait submission and local stream completion in
+    // measured time. The submission itself can cost host time depending on
+    // the installed NVSHMEM transport; this is not a GPU timing benchmark.
+    const auto started = std::chrono::steady_clock::now();
     for (const auto& e : plan_.sendPeers)
       (void)nvshmemx_signal_wait_until_on_stream(
           credit_ + static_cast<std::size_t>(e.pe), NVSHMEM_CMP_EQ,
           previous, stream);
     cudaCheck(cudaStreamSynchronize(stream), "P5.2 wait consumed credits on stream");
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    if (elapsed > 0) {
+      const U64 ns = static_cast<U64>(elapsed);
+      counts_.creditWaitNanos += ns;
+      counts_.maxCreditWaitNanos = std::max(counts_.maxCreditWaitNanos, ns);
+    }
   }
 
   void packCuda(const Vector& X) const {
@@ -336,6 +352,13 @@ class Exchange {
               "P5.2 receiver ACK operations locally issued");
   }
 
+  // Test-only local delay: after all GPU inbox reads, before publishing
+  // the consumption ACK. Never enabled by normal P5.2.
+  void setStressAckDelayMs(int ms) {
+    require(ms >= 0 && ms <= 1000, "invalid P5.2.1 ACK delay");
+    stressAckDelayMs_ = ms;
+  }
+
   // There are ZERO world collectives in this function. Only peer waits can
   // block, exactly as per-peer MPI requests + Waitall would. No receiver GPU
   // kernel needs to be resident when a remote PUT+signal arrives.
@@ -352,6 +375,11 @@ class Exchange {
     waitReadyOnStream(current);
     unpackCuda(Y);
     localCuda(X, Y);
+    // P5.2.1: exercise sender credit backpressure while the receiver
+    // has already consumed the inbox but has not sent ACK(current).
+    // No MPI or collective operations are introduced here.
+    if (stressAckDelayMs_ > 0 && nRecv_ > 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(stressAckDelayMs_));
     acknowledgeCuda(current);
     generation_ = current;
 
@@ -398,6 +426,7 @@ class Exchange {
   U64* ready_ = nullptr;
   U64* credit_ = nullptr;
   U64 generation_ = 0;
+  int stressAckDelayMs_ = 0; // 0 during all normal P5.2 Imports
   Counters counts_;
   Kokkos::View<Local*, Kokkos::CudaSpace> localDevice_;
   Kokkos::View<U64*, Kokkos::CudaSpace> packLidsDevice_;

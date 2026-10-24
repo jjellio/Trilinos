@@ -16,6 +16,12 @@ OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P4_CTEST
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P51_CTEST
   "Register single-PE P5.1 plan-only smoke test (needs a CUDA GPU/NVSHMEM initialization)"
   ON)
+OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P521_CTEST
+  "Register P5.2.1 repeated NVSHMEM-only Import smoke (needs GPU/NVSHMEM)"
+  OFF)
+IF(PERFORMANCE_CGSOLVE_NVSHMEM_P521_CTEST AND NOT PERFORMANCE_CGSOLVE_NVSHMEM)
+  MESSAGE(FATAL_ERROR "P5.2.1 CTest requires PERFORMANCE_CGSOLVE_NVSHMEM=ON")
+ENDIF()
 OPTION(PERFORMANCE_CGSOLVE_NVSHMEM_P52_CTEST
   "Register single-PE P5.2 point-to-point PUT+signal correctness smoke (CUDA/NVSHMEM)"
   ON)
@@ -95,6 +101,20 @@ IF(Tpetra_INST_DOUBLE)
       Performance-CGSolve
       NAME P52_PeerCreditPut_Smoke_1PE
       ARGS "--nvshmem-p52 --size=8 --nvshmem-p52-epochs=4 --nvshmem-p52-cycles=2 --nvshmem-p52-max-nodes=1"
+      COMM mpi
+      NUM_MPI_PROCS 1
+      RUN_SERIAL
+      CATEGORIES BASIC
+    )
+  ENDIF()
+
+  # Single-PE integration smoke for the P5.2.1 stress path. The separate
+  # P5.2.1 CTest sweep deliberately includes multi-PE and inter-node cases.
+  IF(PERFORMANCE_CGSOLVE_NVSHMEM_P521_CTEST)
+    TRIBITS_ADD_TEST(
+      Performance-CGSolve
+      NAME P521_NVSHMEM_Only_Smoke_1PE
+      ARGS "--nvshmem-p52 --nvshmem-p52-case=all --size=8 --nvshmem-p52-epochs=16 --nvshmem-p52-cycles=2 --nvshmem-p52-stress-only"
       COMM mpi
       NUM_MPI_PROCS 1
       RUN_SERIAL
