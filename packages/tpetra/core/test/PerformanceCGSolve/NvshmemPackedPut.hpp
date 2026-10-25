@@ -23,6 +23,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <chrono>
 #include <thread>
 #include <algorithm>
@@ -69,6 +70,43 @@ static __global__ void packedPutSignalKernel(
   }
 }
 
+// P6.1 variant B: one *complete warp* per destination PE packet. The
+// nvshmemx_*_warp call is collective within THAT warp only. All 32 lanes
+// execute the same call with identical arguments; an unused entire warp
+// skips it uniformly. It is NOT an inter-PE or cooperative-grid collective.
+// One CUDA block contains four independent 32-lane warps.
+static __global__ void packedPutSignalWarpKernel(
+    const PackedPutP51::SendPeer* sends, std::size_t nSend,
+    double* remoteInbox, const double* packed, U64* remoteReady, U64 generation) {
+  const std::size_t warpsPerBlock = static_cast<std::size_t>(blockDim.x) / 32U;
+  const std::size_t warpInBlock = static_cast<std::size_t>(threadIdx.x) / 32U;
+  const std::size_t peer = static_cast<std::size_t>(blockIdx.x) * warpsPerBlock
+                             + warpInBlock;
+  if (peer < nSend) { // uniform branch across the entire warp
+    const PackedPutP51::SendPeer e = sends[peer];
+    nvshmemx_double_put_signal_warp(
+        remoteInbox + e.remoteInboxOffset, packed + e.packOffset,
+        static_cast<std::size_t>(e.count), remoteReady + e.remoteSignalIndex,
+        generation, NVSHMEM_SIGNAL_SET, e.pe);
+  }
+}
+
+// P6.1 variant C: one *complete CUDA block* per destination PE packet.
+// Every thread in a 128-thread block participates in the same NVSHMEM call.
+// The block-scoped API must NEVER be called by only threadIdx.x==0.
+static __global__ void packedPutSignalBlockKernel(
+    const PackedPutP51::SendPeer* sends, std::size_t nSend,
+    double* remoteInbox, const double* packed, U64* remoteReady, U64 generation) {
+  const std::size_t peer = static_cast<std::size_t>(blockIdx.x);
+  if (peer < nSend) { // uniform branch across the entire CUDA block
+    const PackedPutP51::SendPeer e = sends[peer];
+    nvshmemx_double_put_signal_block(
+        remoteInbox + e.remoteInboxOffset, packed + e.packOffset,
+        static_cast<std::size_t>(e.count), remoteReady + e.remoteSignalIndex,
+        generation, NVSHMEM_SIGNAL_SET, e.pe);
+  }
+}
+
 // One remote writer per credit slot; SET needs neither CAS nor a lock.
 // This kernel only publishes acknowledgments after unpackCuda() has
 // finished all local inbox reads.
@@ -85,6 +123,19 @@ static __global__ void acknowledgeConsumedKernel(
                        NVSHMEM_SIGNAL_SET, e.pe);
   }
 }
+
+// Optional P6 timing of the *same production algorithm* used by import().
+// The uninstrumented path does not sample a clock. These are CPU wall-clock
+// durations, each enclosing the stage's normal CUDA launch/fence or NVSHMEMx
+// stream wait/synchronization. They are NOT isolated NIC wire latencies.
+enum Phase : std::size_t {
+  CreditWait = 0, Pack = 1, PutSignal = 2, ReadyWait = 3,
+  Unpack = 4, Local = 5, Ack = 6, PhaseCount = 7
+};
+struct PhaseTimings {
+  std::array<std::uint64_t, PhaseCount> nanoseconds{};
+  std::uint64_t totalNanoseconds = 0;
+};
 
 struct Counters {
   U64 imports = 0;
@@ -286,6 +337,35 @@ class Exchange {
               "P5.2 all local GPU PUT+signal calls finished");
   }
 
+  // P6.1 B: preserve issuePutsCuda (one thread/peer) as the baseline.
+  // This path changes ONLY the GPU PUT issuance granularity. All other
+  // synchronization, scratch layout, unpack and ACK work remains identical.
+  void issuePutsWarpCuda(U64 generation) const {
+    if (nSend_ == 0) return;
+    constexpr unsigned int threads = 128; // 4 complete warps per CUDA block
+    constexpr std::size_t warpsPerBlock = threads / 32;
+    const unsigned int blocks = static_cast<unsigned int>(
+        (nSend_ + warpsPerBlock - 1) / warpsPerBlock);
+    packedPutSignalWarpKernel<<<blocks, threads, 0, 0>>>(
+        sendDevice_.data(), nSend_, inbox_, packed_, ready_, generation);
+    cudaCheck(cudaGetLastError(), "P6.1 launch per-peer warp PUT+signal");
+    cudaCheck(cudaStreamSynchronize(0),
+              "P6.1 all local warp PUT+signal calls finished");
+  }
+
+  // P6.1 C: one 128-thread CUDA block for each destination peer packet.
+  // No more than one logical PUT or ready signal is issued per peer.
+  void issuePutsThreadBlockCuda(U64 generation) const {
+    if (nSend_ == 0) return;
+    constexpr unsigned int threads = 128;
+    const unsigned int blocks = static_cast<unsigned int>(nSend_);
+    packedPutSignalBlockKernel<<<blocks, threads, 0, 0>>>(
+        sendDevice_.data(), nSend_, inbox_, packed_, ready_, generation);
+    cudaCheck(cudaGetLastError(), "P6.1 launch per-peer block PUT+signal");
+    cudaCheck(cudaStreamSynchronize(0),
+              "P6.1 all local block PUT+signal calls finished");
+  }
+
   // NVSHMEMx host-issued on-stream wait is the documented alternative to a
   // kernel calling nvshmem_signal_wait_until, and does not require an
   // nvshmemx_collective_launch. Only actual incoming source PEs are waited.
@@ -362,25 +442,46 @@ class Exchange {
   // There are ZERO world collectives in this function. Only peer waits can
   // block, exactly as per-peer MPI requests + Waitall would. No receiver GPU
   // kernel needs to be resident when a remote PUT+signal arrives.
-  void import(const Vector& X, Vector& Y) {
+  void import(const Vector& X, Vector& Y, PhaseTimings* phases = nullptr) {
     require(packed_ && inbox_ && ready_ && credit_, "Import after release");
     require(generation_ < std::numeric_limits<U64>::max(),
             "generation overflow; collectively rebuild exchange");
     const U64 current = generation_ + 1;
+    // All measurements are stack-only and opt-in. No GPU/host/symmetric
+    // allocation is performed here. The uninstrumented direct comparison
+    // follows exactly the same code, with no clock sampling.
+    using Timer = std::chrono::steady_clock;
+    Timer::time_point last;
+    if (phases) { *phases = PhaseTimings{}; last = Timer::now(); }
+    const auto record = [&](const Phase phase) {
+      if (!phases) return;
+      const auto now = Timer::now();
+      phases->nanoseconds[static_cast<std::size_t>(phase)] =
+          static_cast<U64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+              now - last).count());
+      last = now;
+    };
     // No ready-wait can stall another PE's *unissued* send for this epoch:
     // finish every local PUT first, then wait for incoming peer signals.
     waitPreviousCredits(generation_);
+    record(CreditWait);
     packCuda(X);
+    record(Pack);
     issuePutsCuda(current);
+    record(PutSignal);
     waitReadyOnStream(current);
+    record(ReadyWait);
     unpackCuda(Y);
+    record(Unpack);
     localCuda(X, Y);
+    record(NvshmemPackedPut::Local);
     // P5.2.1: exercise sender credit backpressure while the receiver
     // has already consumed the inbox but has not sent ACK(current).
     // No MPI or collective operations are introduced here.
     if (stressAckDelayMs_ > 0 && nRecv_ > 0)
       std::this_thread::sleep_for(std::chrono::milliseconds(stressAckDelayMs_));
     acknowledgeCuda(current);
+    record(Ack);
     generation_ = current;
 
     ++counts_.imports;
@@ -395,6 +496,25 @@ class Exchange {
     counts_.creditWaits += (current == 1 ? 0 : static_cast<U64>(nSend_));
     counts_.ackSignals += static_cast<U64>(nRecv_);
     counts_.localElements += static_cast<U64>(nLocal_);
+    if (phases) {
+      // Sum disjoint stage durations; tiny counter-bookkeeping tail excluded.
+      // The caller also times the total Import with its own host clock.
+      phases->totalNanoseconds = 0;
+      for (const auto ns : phases->nanoseconds)
+        phases->totalNanoseconds += ns;
+    }
+  }
+
+  // P6.1 B and C: explicit entry points for the two new PUT granularities.
+  // Existing Exchange::import() and its single-thread PUT path are unchanged.
+  // The common protocol helper below duplicates the proven P5.2 ordering
+  // rather than rewriting its production baseline code.
+  void importWarp(const Vector& X, Vector& Y, PhaseTimings* phases = nullptr) {
+    importCooperative<true>(X, Y, phases);
+  }
+  void importThreadBlock(const Vector& X, Vector& Y,
+                         PhaseTimings* phases = nullptr) {
+    importCooperative<false>(X, Y, phases);
   }
 
   // Collective symmetric retirement is a lifecycle event, not an Import
@@ -417,6 +537,63 @@ class Exchange {
   }
 
  private:
+  // The two new entry points differ ONLY in this PUT stage. No change is
+  // made to the original import() implementation or its single-thread API.
+  template<bool Warp>
+  void importCooperative(const Vector& X, Vector& Y, PhaseTimings* phases) {
+    require(packed_ && inbox_ && ready_ && credit_, "Import after release");
+    require(generation_ < std::numeric_limits<U64>::max(),
+            "generation overflow; collectively rebuild exchange");
+    const U64 current = generation_ + 1;
+    using Timer = std::chrono::steady_clock;
+    Timer::time_point last;
+    if (phases) { *phases = PhaseTimings{}; last = Timer::now(); }
+    const auto record = [&](const Phase phase) {
+      if (!phases) return;
+      const auto now = Timer::now();
+      phases->nanoseconds[static_cast<std::size_t>(phase)] =
+          static_cast<U64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+              now - last).count());
+      last = now;
+    };
+    waitPreviousCredits(generation_);
+    record(CreditWait);
+    packCuda(X);
+    record(Pack);
+    if constexpr (Warp) issuePutsWarpCuda(current);
+    else issuePutsThreadBlockCuda(current);
+    record(PutSignal);
+    waitReadyOnStream(current);
+    record(ReadyWait);
+    unpackCuda(Y);
+    record(Unpack);
+    localCuda(X, Y);
+    record(NvshmemPackedPut::Local);
+    if (stressAckDelayMs_ > 0 && nRecv_ > 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(stressAckDelayMs_));
+    acknowledgeCuda(current);
+    record(Ack);
+    generation_ = current;
+
+    ++counts_.imports;
+    counts_.packLaunches += (packElements_ != 0);
+    counts_.sendLaunches += (nSend_ != 0);
+    counts_.unpackLaunches += (inboxElements_ != 0);
+    counts_.localLaunches += (nLocal_ != 0);
+    counts_.ackLaunches += (nRecv_ != 0);
+    counts_.putCalls += static_cast<U64>(nSend_);
+    counts_.putElements += static_cast<U64>(packElements_);
+    counts_.readyWaits += static_cast<U64>(nRecv_);
+    counts_.creditWaits += (current == 1 ? 0 : static_cast<U64>(nSend_));
+    counts_.ackSignals += static_cast<U64>(nRecv_);
+    counts_.localElements += static_cast<U64>(nLocal_);
+    if (phases) {
+      phases->totalNanoseconds = 0;
+      for (const auto ns : phases->nanoseconds)
+        phases->totalNanoseconds += ns;
+    }
+  }
+
   const Plan& plan_;
   const NvshmemP0::Session& session_;
   std::size_t owned_, target_, packElements_, inboxElements_;

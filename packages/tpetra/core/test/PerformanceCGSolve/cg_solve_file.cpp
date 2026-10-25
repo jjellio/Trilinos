@@ -37,6 +37,7 @@
 #include "NvshmemP50.hpp"
 #include "NvshmemP51.hpp"
 #include "NvshmemP52.hpp"
+#include "NvshmemP6.hpp"
 #ifndef HAVE_TPETRA_INST_CUDA
 #error "PERFORMANCE_CGSOLVE_NVSHMEM requires a CUDA-enabled Tpetra instantiation"
 #endif
@@ -488,6 +489,16 @@ int runNvshmemP52(const NvshmemP0::Session& session,
   NvshmemP52::run<LO, GO, Node>(session, opts, nsize, filename);
   return EXIT_SUCCESS;
 }
+// P6: allocation-excluded Tpetra vs packed-PUT end-to-end and stage timings.
+int runNvshmemP6(const NvshmemP0::Session& session,
+                 const NvshmemP6::Options& opts) {
+  using namespace CGParams;
+  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
+  using LO = Tpetra::Map<>::local_ordinal_type;
+  using GO = Tpetra::Map<>::global_ordinal_type;
+  NvshmemP6::run<LO, GO, Node>(session, opts, nsize, filename);
+  return EXIT_SUCCESS;
+}
 #endif
 
 int main(int argc, char* argv[]) {
@@ -534,6 +545,8 @@ int main(int argc, char* argv[]) {
   NvshmemP51::Options nvshmemP51Options;
   bool nvshmemP52 = false;
   NvshmemP52::Options nvshmemP52Options;
+  bool nvshmemP6 = false;
+  NvshmemP6::Options nvshmemP6Options;
 #endif
 
   Teuchos::CommandLineProcessor cmdp(false, true);
@@ -671,6 +684,29 @@ int main(int argc, char* argv[]) {
                  "Full host owner/LID value verification stride (default every Import).");
   cmdp.setOption("nvshmem-p52-stress-seed", &nvshmemP52Options.stressSeed,
                  "Deterministic per-PE independent skew/ACK delay seed.");
+  cmdp.setOption("nvshmem-p6", "no-nvshmem-p6", &nvshmemP6,
+                 "P6 benchmark: identical Tpetra doImport vs allocation-prepared packed PUT, plus NVSHMEM phases.");
+  cmdp.setOption("nvshmem-p6-case", &nvshmemP6Options.only,
+                 "matrix (default)|all|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
+  cmdp.setOption("nvshmem-p6-mode", &nvshmemP6Options.mode,
+                 "both (default)|direct|phases. Direct uses fence/barrier timing; phases use no intra-loop MPI.");
+  cmdp.setOption("nvshmem-p6-put-variant", &nvshmemP6Options.putVariant,
+                 "P6.1 GPU PUT issuance: thread (P6 baseline)|warp (32 lanes per peer)|block (128 threads per peer).");
+  cmdp.setOption("nvshmem-p6-warmup", &nvshmemP6Options.warmup,
+                 "Untimed Tpetra + NVSHMEM warmup repetitions per Map (default 8).");
+  cmdp.setOption("nvshmem-p6-reps", &nvshmemP6Options.repetitions,
+                 "Direct fence/barrier/fence measured repetitions of each method (default 100).");
+  cmdp.setOption("nvshmem-p6-phase-reps", &nvshmemP6Options.phaseRepetitions,
+                 "NVSHMEM-only no-MPI stage-timed repetitions (default 100).");
+  cmdp.setOption("nvshmem-p6-out", &nvshmemP6Options.outputPrefix,
+                 "Optional output prefix for rank0 CSV with every rank's raw timing samples.");
+  cmdp.setOption("nvshmem-p6-min-nodes", &nvshmemP6Options.minimumNodes,
+                 "Required minimum physical node count (default 1).");
+  cmdp.setOption("nvshmem-p6-max-nodes", &nvshmemP6Options.maximumNodes,
+                 "Required maximum physical node count (0 unlimited).");
+  cmdp.setOption("nvshmem-p6-cross-node", "no-nvshmem-p6-cross-node",
+                 &nvshmemP6Options.requireCrossNode,
+                 "Require a genuine cross-node packet relationship in selected cases.");
 #endif
   // Only provide the option to use Node types that are actually enabled in this build
 #ifdef HAVE_TPETRA_INST_SYCL
@@ -740,16 +776,17 @@ int main(int argc, char* argv[]) {
   if (static_cast<int>(nvshmemP0) + static_cast<int>(nvshmemP1) +
           static_cast<int>(nvshmemP2) + static_cast<int>(nvshmemP3) +
           static_cast<int>(nvshmemP4) + static_cast<int>(nvshmemP50) +
-          static_cast<int>(nvshmemP51) + static_cast<int>(nvshmemP52) > 1) {
+          static_cast<int>(nvshmemP51) + static_cast<int>(nvshmemP52) +
+          static_cast<int>(nvshmemP6) > 1) {
     if (myRank == 0)
-      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1, --nvshmem-p2, --nvshmem-p3, --nvshmem-p4, --nvshmem-p50, --nvshmem-p51 or --nvshmem-p52.\n";
+      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1, --nvshmem-p2, --nvshmem-p3, --nvshmem-p4, --nvshmem-p50, --nvshmem-p51, --nvshmem-p52 or --nvshmem-p6.\n";
     return EXIT_FAILURE;
   }
-  if ((nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52) &&
+  if ((nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52 || nvshmemP6) &&
       (!useCuda || useSYCL || useHIP || useOpenMP ||
        useThreads || useSerial)) {
     if (myRank == 0) {
-      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2/--nvshmem-p3/--nvshmem-p4/--nvshmem-p50/--nvshmem-p51/--nvshmem-p52 require the CUDA Tpetra backend "
+      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2/--nvshmem-p3/--nvshmem-p4/--nvshmem-p50/--nvshmem-p51/--nvshmem-p52/--nvshmem-p6 require the CUDA Tpetra backend "
                    "(use --cuda and --numgpus=<GPUs visible per node>).\n";
     }
     return EXIT_FAILURE;
@@ -766,7 +803,7 @@ int main(int argc, char* argv[]) {
   kokkosArgs.set_disable_warnings(!verbose);
   int deviceRank = myRank;
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52) {
+  if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52 || nvshmemP6) {
     // Kokkos owns CUDA device initialization. Use local MPI rank to choose
     // a GPU when each node exposes multiple GPUs to its local ranks.
     deviceRank = NvshmemP0::nodeLocalMpiRank(MPI_COMM_WORLD);
@@ -778,7 +815,7 @@ int main(int argc, char* argv[]) {
   int status = EXIT_FAILURE;
   try {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-    if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52) {
+    if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52 || nvshmemP6) {
       // Destroy NVSHMEM session before Kokkos::finalize and MPI_Finalize.
       NvshmemP0::Session session(MPI_COMM_WORLD);
       session.describe(deviceRank % numgpus);
@@ -789,7 +826,8 @@ int main(int argc, char* argv[]) {
       else if (nvshmemP4) status = runNvshmemP4(session, nvshmemP4Options);
       else if (nvshmemP50) status = runNvshmemP50(session, nvshmemP50Options);
       else if (nvshmemP51) status = runNvshmemP51(session, nvshmemP51Options);
-      else status = runNvshmemP52(session, nvshmemP52Options);
+      else if (nvshmemP52) status = runNvshmemP52(session, nvshmemP52Options);
+      else status = runNvshmemP6(session, nvshmemP6Options);
     } else
 #endif
     {
