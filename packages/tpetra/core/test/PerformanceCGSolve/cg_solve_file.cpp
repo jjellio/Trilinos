@@ -337,7 +337,7 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("nvshmem-p62-case", &nvshmemP62Options.only,
                  "matrix|all|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
   cmdp.setOption("nvshmem-p62-mode", &nvshmemP62Options.mode,
-                 "direct|diagnostics|both; barrier always outside GPU Import timing.");
+                 "direct|diagnostics|both|p71; p71 adds independently probed CUDA kernels.");
   cmdp.setOption("nvshmem-p62-put-variant", &nvshmemP62Options.putVariant,
                  "thread|warp|block (one independent PUT/signal per descriptor).");
   cmdp.setOption("nvshmem-p62-chunk", &nvshmemP62Options.chunkDoubles,
@@ -350,10 +350,14 @@ int main(int argc, char* argv[]) {
                  "Direct comparisons per method (default 30).");
   cmdp.setOption("nvshmem-p62-diagnostic-reps", &nvshmemP62Options.diagnosticRepetitions,
                  "Two-stream host submission/completion diagnostic samples (default 30).");
+  cmdp.setOption("nvshmem-p62-p71-reps", &nvshmemP62Options.p71ProfileRepetitions,
+                 "P7.1 sampled GPU diagnostic epochs (default 12, not timed B0).");
+  cmdp.setOption("nvshmem-p62-p71-max-samples", &nvshmemP62Options.p71MaxSamples,
+                 "P7.1 max GPU work units sampled per direction and PE (default 64).");
   cmdp.setOption("nvshmem-p62-verify-every", &nvshmemP62Options.verifyEvery,
                  "Validate every epoch after the timer: 0=no (default), 1=yes.");
   cmdp.setOption("nvshmem-p62-out", &nvshmemP62Options.outputPrefix,
-                 "Optional rank0 raw per-rank timing CSV prefix.");
+                 "Raw rank0 timing CSV prefix; required by mode=p71 for all-rank probe CSVs.");
   cmdp.setOption("nvshmem-p62-min-nodes", &nvshmemP62Options.minimumNodes,
                  "Required minimum distinct physical nodes.");
   cmdp.setOption("nvshmem-p62-max-nodes", &nvshmemP62Options.maximumNodes,

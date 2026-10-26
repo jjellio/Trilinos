@@ -38,3 +38,21 @@ python3 test_nvshmem_p62_layout.py
 ```
 
 **P7 alternatives are only planned, not implemented.** No production solver integration or performance claim is made by the cleanup.
+
+## P7.1 instrumentation (opt-in; current source)
+
+`--nvshmem-p62-mode=p71` adds a **separate** sampled GPU diagnostic section *after* an uninstrumented, alternating MPI/P6.2 comparison. The original P6.2 CUDA kernel bodies, packet plan and PUT-with-signal protocol are unchanged. The new mode measures per-stream CUDA event durations, sampled `clock64` gather/PUT-call-return/ready-poll/scatter intervals and correctly paired barrier-plus-Import totals. It writes one rank-local probe CSV per rank and a rank0 combined timing CSV; `--nvshmem-p62-out=PREFIX` is required.
+
+See `P71_COMPLETION_COST_README.md` for the exact CLI/sweep, analysis methodology, transport controls and current limitations. Host-only validation adds `test_nvshmem_p71_stats.cpp` and `test_nvshmem_p71_layout.py`; `PERFORMANCE_CGSOLVE_NVSHMEM_P71_CTEST=ON` optionally registers a single-PE smoke. This is **instrumentation only**: no NBI, quiet/fence, or aggregate-completion variant exists yet, and no GPU/runtime validation is claimed without cluster runs.
+
+## P7.1b matrix-free topology benchmark
+
+The **separate executable** `TpetraCore_ImportTopologyBenchmark.exe` builds balanced,
+parameterized source/target Maps and a stock Tpetra Importer **without a matrix**.
+It varies off-node/intra-node peer degree, per-peer versus total packet volume,
+contiguous/strided/permuted source GIDs, and target local/remote interleaving.
+Actual Importer peer relationships are checked against the graph before any
+benchmarking. It uses the **same frozen P6.2 / P7.1 GPU kernels and matched
+completed-Import comparison**, not a new or faster completion protocol.
+See `P71B_MATRIX_FREE_IMPORT_BENCHMARK.md` and `run_import_topology_sweep.sh`.
+The existing `Performance-CGSolve.exe` entry points remain unchanged.

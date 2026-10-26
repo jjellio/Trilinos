@@ -51,6 +51,8 @@ B2's initial implementation can legitimately use **three kernels plus a stream-q
 
 ### P7.1 — Completion cost measurement / no algorithm change
 
+**Implementation note (October 25, 2026):** The new opt-in `--nvshmem-p62-mode=p71` diagnostic clones, per-rank CSVs and launch analysis/sweep utilities are implemented as described in `P71_COMPLETION_COST_README.md`. The frozen B0 producer/receiver kernels are unchanged. This is **not a passed cluster acceptance gate**: native CUDA compilation and actual cross-node/Nsight measurements are pending.
+
 - Add instrumentation around send-side pack, NBI/PUT issue, host/on-stream quiet, ready polling, scatter, and final GPU synchronization, without placing per-transfer host fences in the hot path.
 - Quantify `K = {512, 1024, 2048}` doubles, warp and block variants on `inter8`; include `inter2` for a mostly network-oriented control. Keep IBRC and IBGDA-on/CPU-handler separately. Confirm actual NIC-handler selection.
 - Gate: show paired full-Import latency and a GPU timeline explaining where the difference between B0 and MPI arises (receiver wait, signal updates, kernel launch, network, local work, or barrier).

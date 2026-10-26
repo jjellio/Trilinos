@@ -25,6 +25,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <sstream>
 #include <vector>
 
 namespace NvshmemP62 {
@@ -36,13 +37,15 @@ using NvshmemP6::elapsedMicroseconds;
 
 struct Options {
   std::string only = "matrix";
-  std::string mode = "direct"; // direct, diagnostics, both
+  std::string mode = "direct"; // direct, diagnostics, both, p71
   std::string putVariant = "warp";
   int chunkDoubles = 512;
   int receiverBlocks = 4;
   int warmup = 5;
   int repetitions = 30;
   int diagnosticRepetitions = 30;
+  int p71ProfileRepetitions = 12;   // only in --nvshmem-p62-mode=p71
+  int p71MaxSamples = 64;          // sampled work units per category and PE
   int verifyEvery = 0; // 1 for every epoch, 0 for warmup and final check
   int minimumNodes = 1;
   int maximumNodes = 0;
@@ -54,8 +57,11 @@ inline void checkOptions(const Options& o) {
   require(o.only == "all" ||
               std::find(cases.begin(), cases.end(), o.only) != cases.end(),
           "P6.2 invalid case");
-  require(o.mode == "direct" || o.mode == "diagnostics" || o.mode == "both",
-          "P6.2 mode must be direct|diagnostics|both");
+  require(o.mode == "direct" || o.mode == "diagnostics" || o.mode == "both" ||
+              o.mode == "p71", "P6.2 mode must be direct|diagnostics|both|p71");
+  if (o.mode == "p71")
+    require(!o.outputPrefix.empty(),
+            "P7.1 profiling requires --nvshmem-p62-out for rank-local trace files");
   (void)NvshmemPackedPutP62::parseMode(o.putVariant);
   require(o.chunkDoubles > 0,
           "P6.2 chunk size must be a positive integer");
@@ -65,6 +71,9 @@ inline void checkOptions(const Options& o) {
           o.repetitions >= 5 && o.repetitions <= 5000 &&
           o.diagnosticRepetitions >= 5 && o.diagnosticRepetitions <= 5000,
           "P6.2 warmup/repetition count outside permitted range");
+  require(o.p71ProfileRepetitions >= 2 && o.p71ProfileRepetitions <= 5000 &&
+          o.p71MaxSamples >= 1 && o.p71MaxSamples <= 4096,
+          "P7.1 repetitions must be 2..5000, sampled descriptors 1..4096");
   require(o.verifyEvery == 0 || o.verifyEvery == 1,
           "P6.2 verify-every must be 0 or 1");
   require(o.minimumNodes >= 1 &&
@@ -118,17 +127,19 @@ CaseStats benchmarkCase(
   if (requireRemote)
     require(globalCounts[0] > 0, "P6.2 matrix unexpectedly contains no remote exports");
 
+  const bool p71 = opts.mode == "p71";
   const bool direct = opts.mode != "diagnostics";
-  const bool diagnostics = opts.mode != "direct";
+  const bool diagnostics = opts.mode == "diagnostics" || opts.mode == "both";
   const int directCount = direct ? opts.repetitions : 0;
   const int diagCount = diagnostics ? opts.diagnosticRepetitions : 0;
-  const int maxEpoch = opts.warmup + directCount + diagCount + 3;
+  const int profileCount = p71 ? opts.p71ProfileRepetitions : 0;
+  const int maxEpoch = opts.warmup + directCount + diagCount + profileCount + 3;
   const NvshmemP4::Pattern pattern(
       PackedPutP51::asSize(p51.ownedLength, "P6.2 X length"), session, maxEpoch);
   Vector X(domain), Ytpetra(column), Yput(column);
   NvshmemPackedPutP62::Exchange<LO, GO, Node> exchange(
       p51, plan, NvshmemPackedPutP62::parseMode(opts.putVariant),
-      opts.receiverBlocks);
+      opts.receiverBlocks, p71 ? static_cast<std::size_t>(opts.p71MaxSamples) : 0);
 
   // Every call performs Kokkos::fence() then MPI_Barrier() on the same
   // communicator before launching a new generation. This is the only
@@ -196,6 +207,11 @@ CaseStats benchmarkCase(
   std::vector<double> localT(static_cast<std::size_t>(directCount));
   std::vector<double> localP(static_cast<std::size_t>(directCount));
   std::vector<double> localBarrier(static_cast<std::size_t>(directCount));
+  // P7.1: rank-matched *barrier+Import* samples, not sums of separate
+  // maximum-rank medians. Separate per-method barriers prevent mispairing.
+  std::vector<double> localTFull(static_cast<std::size_t>(directCount));
+  std::vector<double> localPFull(static_cast<std::size_t>(directCount));
+  std::vector<double> localTBarrier(static_cast<std::size_t>(directCount));
   // Diagnostic timings are host wall-clock stage durations and include
   // CUDA launch submissions and final wait; NOT device/NIC wire durations.
   std::array<std::vector<double>, 5> localDiag;
@@ -215,7 +231,10 @@ CaseStats benchmarkCase(
         Kokkos::fence("P6.2 complete Import for matched measurement");
         const double duration = elapsedMicroseconds(started);
         (tpetra ? localT : localP)[static_cast<std::size_t>(i)] = duration;
+        (tpetra ? localTFull : localPFull)[static_cast<std::size_t>(i)] =
+            duration + barrierUs;
         if (!tpetra) localBarrier[static_cast<std::size_t>(i)] = barrierUs;
+        else localTBarrier[static_cast<std::size_t>(i)] = barrierUs;
         if (opts.verifyEvery) {
           verify(tpetra ? Ytpetra : Yput, epoch,
                  tpetra ? "Tpetra direct" : "P6.2 direct");
@@ -257,7 +276,88 @@ CaseStats benchmarkCase(
     ++validations;
   }
 
-  const U64 expectedImports = static_cast<U64>(opts.warmup + directCount + diagCount);
+  // P7.1: diagnostic-only, separately instrumented clones of the frozen B0
+  // GPU kernels. The direct, non-instrumented paired comparison has already
+  // completed before entering this section. Never compare instrumented GPU
+  // timing directly to Tpetra as though the probes had zero overhead.
+  std::array<std::vector<double>, 8> localP71;
+  for (auto& series : localP71)
+    series.resize(static_cast<std::size_t>(profileCount), 0.0);
+  std::ostringstream p71Raw;
+  if (p71) {
+    p71Raw << std::setprecision(12);
+    p71Raw << "case,rank,epoch,kind,descriptor_id,peer_rank,peer_pe,route,"
+              "doubles,first_us,second_us,poll_attempts,clock_khz,sample_stride\n";
+    for (int i = 0; i < profileCount; ++i) {
+      const int epoch = opts.warmup + directCount + diagCount + i;
+      NvshmemP4::fillOwned(X, pattern, session, epoch);
+      const double barrierUs = barrierForImport();
+      NvshmemPackedPutP62::P71ProfileResults result;
+      exchange.importProfiledAfterBarrier(X, Yput, result);
+      // The profiled import returns only after BOTH streams complete, and
+      // collects probes after that completion. Readback is not in the event
+      // durations or the recorded completed-GPU-Import host interval.
+      localP71[0][static_cast<std::size_t>(i)] = barrierUs;
+      localP71[1][static_cast<std::size_t>(i)] = result.host.producerLaunchUs;
+      localP71[2][static_cast<std::size_t>(i)] = result.host.receiverLaunchUs;
+      localP71[3][static_cast<std::size_t>(i)] = result.host.completeUs;
+      localP71[4][static_cast<std::size_t>(i)] = result.sendKernelEventUs;
+      localP71[5][static_cast<std::size_t>(i)] = result.receiveKernelEventUs;
+      localP71[6][static_cast<std::size_t>(i)] = result.host.totalUs;
+      localP71[7][static_cast<std::size_t>(i)] = result.readbackUs;
+      const auto emitProbe = [&](const char* kind, std::size_t id,
+                                 int peerPe, U64 count,
+                                 const NvshmemP71Stats::Probe& probe,
+                                 std::size_t stride) {
+        const int peerRank = peerPe >= 0 ? session.mpiRankForPe(peerPe) : me;
+        require(peerRank >= 0 && peerRank < ranks, "P7.1 invalid peer in probe");
+        const char* route = peerRank == me ? "local" :
+            topology.names[static_cast<std::size_t>(peerRank)] ==
+            topology.names[static_cast<std::size_t>(me)] ? "intra" : "inter";
+        p71Raw << name << ',' << me << ',' << epoch << ',' << kind << ',' << id
+               << ',' << peerRank << ',' << peerPe << ',' << route << ',' << count
+               << ',' << NvshmemP71Stats::cyclesToMicroseconds(
+                          probe.firstCycles, result.clockKHz)
+               << ',' << NvshmemP71Stats::cyclesToMicroseconds(
+                          probe.secondCycles, result.clockKHz)
+               << ',' << probe.pollAttempts << ',' << result.clockKHz
+               << ',' << stride << '\n';
+      };
+      for (std::size_t j = 0; j < result.send.size(); ++j) {
+        const std::size_t id = NvshmemP71Stats::sampledId(result.sendSampling, j);
+        emitProbe("pack_and_put_api_return", id, plan.sends[id].pe,
+                  plan.sends[id].count, result.send[j], result.sendSampling.stride);
+      }
+      for (std::size_t j = 0; j < result.receive.size(); ++j) {
+        const std::size_t id = NvshmemP71Stats::sampledId(result.receiveSampling, j);
+        emitProbe("signal_poll_and_scatter", id, plan.receives[id].sourcePe,
+                  plan.receives[id].count, result.receive[j], result.receiveSampling.stride);
+      }
+      for (std::size_t j = 0; j < result.local.size(); ++j) {
+        const std::size_t id = NvshmemP71Stats::sampledId(result.localSampling, j);
+        emitProbe("local_copy", id, session.pe(), 1, result.local[j],
+                  result.localSampling.stride);
+      }
+      if (opts.verifyEvery) {
+        verify(Yput, epoch, "P7.1 profiled GPU Import");
+        ++validations;
+        restoreDeviceView(Yput);
+      }
+    }
+    verify(Yput, opts.warmup + directCount + diagCount + profileCount - 1,
+           "P7.1 final profiled GPU Import");
+    ++validations;
+    // One file per rank, unique filenames: no concurrent MPI filesystem
+    // writes to rank 0's output; no I/O during timed GPU work.
+    const std::string path = opts.outputPrefix + "_" + name +
+        "_p71_rank" + std::to_string(me) + "_probes.csv";
+    std::ofstream file(path, std::ios::trunc);
+    require(file.good(), "P7.1 could not open local probe CSV " + path);
+    file << p71Raw.str();
+    require(file.good(), "P7.1 could not write local probe CSV " + path);
+  }
+
+  const U64 expectedImports = static_cast<U64>(opts.warmup + directCount + diagCount + profileCount);
   const auto& c = exchange.counters();
   require(c.imports == expectedImports &&
           c.producerKernelLaunches == expectedImports &&
@@ -267,16 +367,25 @@ CaseStats benchmarkCase(
           c.acknowledgementSignals == 0,
           name + ": P6.2 launch/signal counters violate two-kernel model");
 
-  std::vector<double> rootT, rootP, rootBarrier;
+  std::vector<double> rootT, rootP, rootBarrier, rootTFull, rootPFull, rootTBarrier;
   if (direct) {
     rootT = NvshmemP6::gatherSamples(localT, session);
     rootP = NvshmemP6::gatherSamples(localP, session);
     rootBarrier = NvshmemP6::gatherSamples(localBarrier, session);
+    if (p71) {
+      rootTFull = NvshmemP6::gatherSamples(localTFull, session);
+      rootPFull = NvshmemP6::gatherSamples(localPFull, session);
+      rootTBarrier = NvshmemP6::gatherSamples(localTBarrier, session);
+    }
   }
   std::array<std::vector<double>, 5> rootDiag;
   if (diagnostics)
     for (std::size_t i = 0; i < rootDiag.size(); ++i)
       rootDiag[i] = NvshmemP6::gatherSamples(localDiag[i], session);
+  std::array<std::vector<double>, 8> rootP71;
+  if (p71)
+    for (std::size_t i = 0; i < rootP71.size(); ++i)
+      rootP71[i] = NvshmemP6::gatherSamples(localP71[i], session);
   U64 globalValidations = 0;
   mpiCheck(MPI_Allreduce(&validations, &globalValidations, 1, MPI_UINT64_T,
                          MPI_SUM, comm), "P6.2 verification count");
@@ -328,6 +437,38 @@ CaseStats benchmarkCase(
                 << " pairedP90=" << paired.p90
                 << " boundary=fence_barrier_outside_start_import_fence_stop\n";
     }
+    if (p71) {
+      (void)report("P71_FULL", "tpetra_barrier_plus_import", rootTFull, directCount);
+      (void)report("P71_FULL", "p62_barrier_plus_import", rootPFull, directCount);
+      (void)report("P71_BARRIER", "tpetra_start_barrier", rootTBarrier, directCount);
+      // Direct reference samples above are entirely uninstrumented.
+      const auto a = NvshmemP6Stats::summarize(
+          NvshmemP6Stats::maxRankByIteration(rootT, ranks, directCount));
+      const auto b = NvshmemP6Stats::summarize(
+          NvshmemP6Stats::maxRankByIteration(rootPFull, ranks, directCount));
+      std::cout << "[NVSHMEM P7.1 CONTROL] case=" << name
+                << " mpiImportOnlyMedian=" << a.median
+                << " p62WithBarrierMedian=" << b.median
+                << " p62FullOverMpiImportOnly="
+                << (a.median > 0 ? b.median / a.median : 0)
+                << " deployable=NO_gpu_diagnostic_only\n";
+      static const char* p71Labels[] = {
+          "pre_start_barrier", "producer_host_issue_with_events",
+          "receiver_host_issue_with_events", "cudaDeviceSynchronize_host_wait",
+          "producer_cuda_kernel_event", "receiver_cuda_kernel_event",
+          "instrumented_gpu_import_host", "post_import_probe_readback"};
+      for (std::size_t k = 0; k < rootP71.size(); ++k)
+        (void)report("P71_PROFILE", p71Labels[k], rootP71[k], profileCount);
+      std::cout << "[NVSHMEM P7.1 PROFILE] case=" << name
+                << " protocol=unchanged_put_signal_per_descriptor"
+                << " gpuProbeClock=clock64_approximate"
+                << " cudaEvents=per_stream_not_remote_network_latency"
+                << " quietCalls=0 fenceCalls=0 ackCalls=0"
+                << " receiverTestsPerEpoch=" << globalCounts[3]
+                << " gpuKernelLaunchesPerEpoch=2"
+                << " probeFiles=per_rank_profiler_output"
+                << " status=PASS\n";
+    }
     if (diagnostics) {
       static const char* labels[] = {"pre_start_mpi_barrier", "producer_host_issue",
           "receiver_host_issue", "device_completion_host_wait", "total_gpu_import"};
@@ -371,6 +512,8 @@ void run(const NvshmemP0::Session& session, const Options& options,
               << " warmup=" << options.warmup
               << " reps=" << options.repetitions
               << " diagnosticReps=" << options.diagnosticRepetitions
+              << " p71ProfileReps=" << options.p71ProfileRepetitions
+              << " p71MaxSamples=" << options.p71MaxSamples
               << " verifyEvery=" << options.verifyEvery
               << " MPI_Barrier=START_EACH_EXCHANGE"
               << " ACK=NONE twoKernels=YES\n";

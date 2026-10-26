@@ -4,8 +4,11 @@ from pathlib import Path
 
 p = Path(__file__).with_name("NvshmemPackedPutP62.hpp")
 src = p.read_text()
+# P7.1 adds a separate, opt-in diagnostic pair of CUDA kernels. Count only
+# the original B0/P6.2 Import body so the frozen baseline remains testable.
+b0 = src.split("void importAfterBarrier(")[1].split("void importProfiledAfterBarrier(")[0]
 checks = {
-    "two_native_kernel_invocations": src.count("<<<") == 2,
+    "two_native_kernel_invocations": b0.count("<<<") == 2,
     "native_fused_gather_put": "packAndPutKernel" in src and "nvshmem_double_put_signal(" in src,
     "warp_collective": "nvshmemx_double_put_signal_warp(" in src and "__syncwarp()" in src,
     "block_collective": "nvshmemx_double_put_signal_block(" in src and "__syncthreads()" in src,
@@ -14,7 +17,7 @@ checks = {
     "bounded_receiver": "std::max(1, smCount - 1)" in src,
     "local_terminal_join": "cudaDeviceSynchronize()" in src,
     "no_ack_kernel": "acknowledgeConsumedKernel<<<" not in src,
-    "no_mpi_inside_exchange": "MPI_Barrier(" not in src.split("void importAfterBarrier(")[1].split("void release()")[0],
+    "no_mpi_inside_exchange": "MPI_Barrier(" not in b0,
 }
 for name, ok in checks.items():
     print(f"[NVSHMEM P6.2 STATIC] {name}={'PASS' if ok else 'FAIL'}")

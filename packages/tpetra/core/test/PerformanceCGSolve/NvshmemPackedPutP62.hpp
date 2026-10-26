@@ -15,6 +15,7 @@
 
 #include "NvshmemPackedPut.hpp" // cudaCheck, P3::upload and common baseline
 #include "PackedPutP62Plan.hpp"
+#include "NvshmemP71Probes.hpp"
 #include <Kokkos_Core.hpp>
 #include <cuda_runtime.h>
 #include <nvshmem.h>
@@ -26,6 +27,7 @@
 #include <exception>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace NvshmemPackedPutP62 {
 using U64 = PackedPutP51::U64;
@@ -143,6 +145,25 @@ struct HostTimings {
   double totalUs = 0.0;
 };
 
+// Opt-in P7.1 probe results, sampled only in the separate instrumented
+// kernels. GPU event timings measure kernel residency on each individual
+// stream (including waiting); they are NOT NIC transfer times. The clock64
+// per-descriptor results are approximate SM-cycle intervals, NOT a global
+// cross-SM timestamp or an additive critical-path decomposition.
+struct P71ProfileResults {
+  HostTimings host;
+  double sendKernelEventUs = 0.0;
+  double receiveKernelEventUs = 0.0;
+  double readbackUs = 0.0; // excluded from the completed GPU Import time
+  int clockKHz = 0;
+  NvshmemP71Stats::Sampling sendSampling;
+  NvshmemP71Stats::Sampling receiveSampling;
+  NvshmemP71Stats::Sampling localSampling;
+  std::vector<NvshmemP71Stats::Probe> send;
+  std::vector<NvshmemP71Stats::Probe> receive;
+  std::vector<NvshmemP71Stats::Probe> local;
+};
+
 struct Counters {
   U64 imports = 0;
   U64 producerKernelLaunches = 0;
@@ -160,7 +181,8 @@ class Exchange {
   using Vector = Tpetra::Vector<double, LO, GO, Node>;
   Exchange(const PackedPutP51::Plan& base,
            const PackedPutP62::Plan& plan, PutMode mode,
-           int requestedReceiverBlocks = 4)
+           int requestedReceiverBlocks = 4,
+           std::size_t p71SampleCap = 0)
       : base_(base), plan_(plan), mode_(mode),
         nSend_(plan.sends.size()), nRecv_(plan.receives.size()),
         nLocal_(base.local.size()) {
@@ -226,6 +248,27 @@ class Exchange {
     destinationDevice_ = NvshmemP3::upload(
         "P6.2 GID-sorted destination LIDs", plan.destinationLids);
     localDevice_ = NvshmemP3::upload("P6.2 local copies", base.local);
+    if (p71SampleCap != 0) {
+      require(p71SampleCap <= 4096, "P7.1 sample cap exceeds 4096");
+      sendSampling_ = NvshmemP71Stats::planSampling(nSend_, p71SampleCap);
+      receiveSampling_ = NvshmemP71Stats::planSampling(nRecv_, p71SampleCap);
+      localSampling_ = NvshmemP71Stats::planSampling(nLocal_, p71SampleCap);
+      sendProbeDevice_ = Kokkos::View<NvshmemP71Stats::Probe*, Kokkos::CudaSpace>(
+          "P7.1 send samples", std::max<std::size_t>(1, sendSampling_.samples));
+      receiveProbeDevice_ = Kokkos::View<NvshmemP71Stats::Probe*, Kokkos::CudaSpace>(
+          "P7.1 receive samples", std::max<std::size_t>(1, receiveSampling_.samples));
+      localProbeDevice_ = Kokkos::View<NvshmemP71Stats::Probe*, Kokkos::CudaSpace>(
+          "P7.1 local copy samples", std::max<std::size_t>(1, localSampling_.samples));
+      cudaDeviceProp prop{};
+      cudaCheck(cudaGetDeviceProperties(&prop, device), "P7.1 device clock properties");
+      clockKHz_ = 1; //prop.clockRate;
+      require(clockKHz_ > 0, "P7.1 cannot determine GPU SM clock rate");
+      cudaCheck(cudaEventCreate(&sendStart_), "P7.1 CUDA producer start event");
+      cudaCheck(cudaEventCreate(&sendEnd_), "P7.1 CUDA producer end event");
+      cudaCheck(cudaEventCreate(&receiveStart_), "P7.1 CUDA receiver start event");
+      cudaCheck(cudaEventCreate(&receiveEnd_), "P7.1 CUDA receiver end event");
+      p71Enabled_ = true;
+    }
     Kokkos::fence("P6.2 persistent GPU descriptors ready");
   }
   Exchange(const Exchange&) = delete;
@@ -315,11 +358,122 @@ class Exchange {
     counters_.localCopied += static_cast<U64>(nLocal_);
   }
 
+  // P7.1 diagnostics only. This path does NOT replace B0 and its extra
+  // cudaEventRecord/clock64 instructions necessarily change scheduling.
+  // Neither a PUT API-return timestamp nor the receiver's first ready test
+  // proves raw network latency. Source/target/GID semantics are unchanged.
+  // CONTRACT: same caller-enforced start MPI_Barrier as importAfterBarrier().
+  void importProfiledAfterBarrier(const Vector& X, Vector& Y,
+                                  P71ProfileResults& result) {
+    require(p71Enabled_ && packed_ && inbox_ && ready_,
+            "P7.1 profiled Import requires persistent probes and symmetric memory");
+    require(generation_ < std::numeric_limits<U64>::max(),
+            "P7.1 generation overflow");
+    require(X.getMap()->getLocalNumElements() == base_.ownedLength &&
+            Y.getMap()->getLocalNumElements() == base_.targetLength,
+            "P7.1 vector dimensions differ from plan");
+    const U64 epoch = generation_ + 1;
+    auto x = X.getLocalViewDevice(Tpetra::Access::ReadOnly);
+    auto y = Y.getLocalViewDevice(Tpetra::Access::ReadWrite);
+    constexpr unsigned int threads = 128U;
+    std::size_t sendBlocks = 0;
+    switch (mode_) {
+      case PutMode::Thread: sendBlocks = (nSend_ + threads - 1) / threads; break;
+      case PutMode::Warp: sendBlocks = (nSend_ + 3) / 4; break;
+      case PutMode::Block: sendBlocks = nSend_; break;
+    }
+    const std::size_t localBlocks = (nLocal_ + threads - 1) / threads;
+    const std::size_t totalBlocks = std::max<std::size_t>(1, sendBlocks + localBlocks);
+    require(totalBlocks <= static_cast<std::size_t>(std::numeric_limits<unsigned int>::max()),
+            "P7.1 producer CUDA grid overflow");
+    using Clock = std::chrono::steady_clock;
+    using Micros = std::chrono::duration<double, std::micro>;
+    const auto wallStart = Clock::now();
+    cudaCheck(cudaEventRecord(sendStart_, producerStream_),
+              "P7.1 record sender begin");
+#define P71_SEND_KERNEL(M) \
+    NvshmemP71Probes::packAndPutProbed<Send, Local, M> \
+      <<<static_cast<unsigned int>(totalBlocks), threads, 0, producerStream_>>>( \
+        sendsDevice_.data(), nSend_, sendBlocks, sourceDevice_.data(), \
+        packed_, inbox_, ready_, localDevice_.data(), nLocal_, x, y, epoch, \
+        sendProbeDevice_.data(), sendSampling_.stride, \
+        localProbeDevice_.data(), localSampling_.stride)
+    switch (mode_) {
+      case PutMode::Thread: P71_SEND_KERNEL(0); break;
+      case PutMode::Warp: P71_SEND_KERNEL(1); break;
+      case PutMode::Block: P71_SEND_KERNEL(2); break;
+    }
+#undef P71_SEND_KERNEL
+    cudaCheck(cudaGetLastError(), "P7.1 launch instrumented producer");
+    cudaCheck(cudaEventRecord(sendEnd_, producerStream_), "P7.1 record sender end");
+    const auto producerSubmitted = Clock::now();
+    cudaCheck(cudaEventRecord(receiveStart_, receiverStream_),
+              "P7.1 record receiver begin");
+    NvshmemP71Probes::waitAndUnpackProbed<Receive>
+      <<<receiverBlocks_, threads, 0, receiverStream_>>>(
+        receivesDevice_.data(), nRecv_, destinationDevice_.data(),
+        inbox_, ready_, y, epoch, receiveProbeDevice_.data(), receiveSampling_.stride);
+    cudaCheck(cudaGetLastError(), "P7.1 launch instrumented receiver");
+    cudaCheck(cudaEventRecord(receiveEnd_, receiverStream_),
+              "P7.1 record receiver end");
+    const auto receiverSubmitted = Clock::now();
+    cudaCheck(cudaDeviceSynchronize(), "P7.1 two-stream device completion");
+    const auto completed = Clock::now();
+    result.host.producerLaunchUs = Micros(producerSubmitted - wallStart).count();
+    result.host.receiverLaunchUs = Micros(receiverSubmitted - producerSubmitted).count();
+    result.host.completeUs = Micros(completed - receiverSubmitted).count();
+    result.host.totalUs = Micros(completed - wallStart).count();
+    float sendMs = 0.0F, receiveMs = 0.0F;
+    cudaCheck(cudaEventElapsedTime(&sendMs, sendStart_, sendEnd_),
+              "P7.1 producer event elapsed");
+    cudaCheck(cudaEventElapsedTime(&receiveMs, receiveStart_, receiveEnd_),
+              "P7.1 receiver event elapsed");
+    result.sendKernelEventUs = static_cast<double>(sendMs) * 1000.0;
+    result.receiveKernelEventUs = static_cast<double>(receiveMs) * 1000.0;
+    result.clockKHz = clockKHz_;
+    result.sendSampling = sendSampling_;
+    result.receiveSampling = receiveSampling_;
+    result.localSampling = localSampling_;
+    const auto readbackStart = Clock::now();
+    // A SINGLE post-completion readback per sampling class: no transfers or
+    // host-device synchronizations inside the descriptor loops.
+    const auto retrieve = [](std::vector<NvshmemP71Stats::Probe>& output,
+                             const Kokkos::View<NvshmemP71Stats::Probe*, Kokkos::CudaSpace>& source,
+                             std::size_t count, const char* stage) {
+      output.resize(count);
+      if (count)
+        cudaCheck(cudaMemcpy(output.data(), source.data(),
+                             count * sizeof(NvshmemP71Stats::Probe),
+                             cudaMemcpyDeviceToHost), stage);
+    };
+    retrieve(result.send, sendProbeDevice_, sendSampling_.samples, "P7.1 send probe readback");
+    retrieve(result.receive, receiveProbeDevice_, receiveSampling_.samples,
+             "P7.1 receive probe readback");
+    retrieve(result.local, localProbeDevice_, localSampling_.samples,
+             "P7.1 local probe readback");
+    result.readbackUs = Micros(Clock::now() - readbackStart).count();
+    generation_ = epoch;
+    ++counters_.imports;
+    ++counters_.producerKernelLaunches;
+    ++counters_.receiverKernelLaunches;
+    counters_.putCalls += static_cast<U64>(nSend_);
+    counters_.putDoubles += base_.packElements;
+    counters_.expectedSignals += static_cast<U64>(nRecv_);
+    counters_.localCopied += static_cast<U64>(nLocal_);
+  }
+
   // Collective retirement; all PEs have completed their last Import before
   // nvshmem_free barriers can retire ready slots/inboxes safely.
   void release() {
     if (!packed_) return;
     cudaCheck(cudaDeviceSynchronize(), "P6.2 drain streams before free");
+    if (p71Enabled_) {
+      cudaCheck(cudaEventDestroy(receiveEnd_), "P7.1 destroy receiver end event");
+      cudaCheck(cudaEventDestroy(receiveStart_), "P7.1 destroy receiver start event");
+      cudaCheck(cudaEventDestroy(sendEnd_), "P7.1 destroy sender end event");
+      cudaCheck(cudaEventDestroy(sendStart_), "P7.1 destroy sender start event");
+      p71Enabled_ = false;
+    }
     nvshmem_free(ready_);
     nvshmem_free(inbox_);
     nvshmem_free(packed_);
@@ -349,6 +503,16 @@ class Exchange {
   Kokkos::View<U64*, Kokkos::CudaSpace> sourceDevice_;
   Kokkos::View<U64*, Kokkos::CudaSpace> destinationDevice_;
   Kokkos::View<Local*, Kokkos::CudaSpace> localDevice_;
+  bool p71Enabled_ = false;
+  int clockKHz_ = 0;
+  NvshmemP71Stats::Sampling sendSampling_;
+  NvshmemP71Stats::Sampling receiveSampling_;
+  NvshmemP71Stats::Sampling localSampling_;
+  Kokkos::View<NvshmemP71Stats::Probe*, Kokkos::CudaSpace> sendProbeDevice_;
+  Kokkos::View<NvshmemP71Stats::Probe*, Kokkos::CudaSpace> receiveProbeDevice_;
+  Kokkos::View<NvshmemP71Stats::Probe*, Kokkos::CudaSpace> localProbeDevice_;
+  cudaEvent_t sendStart_ = nullptr, sendEnd_ = nullptr;
+  cudaEvent_t receiveStart_ = nullptr, receiveEnd_ = nullptr;
 };
 } // namespace NvshmemPackedPutP62
 #endif
