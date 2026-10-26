@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Controlled P6.2 sweep. Run from an allocation already containing the nodes.
 # One MPI job per (chunk size, thread/warp/block) point; the two CUDA kernels
-# execute only inside that job. P6.1 baselines remain available via run_p61_variants.sh.
+# execute only inside that job. Historical P6.1 drivers are in the pre-P7 Git tag.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOPOLOGY="${1:-inter8}"  # smoke1, intra2, intra4, inter2, inter8, inter16

@@ -29,15 +29,9 @@
 #include <functional>
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
+// P6.2 is the fixed reference for the P7 completion-protocol experiment.
+// Legacy shared utility headers remain transitively required for now.
 #include "NvshmemP0.hpp"
-#include "NvshmemP1.hpp"
-#include "NvshmemP2.hpp"
-#include "NvshmemP3.hpp"
-#include "NvshmemP4.hpp"
-#include "NvshmemP50.hpp"
-#include "NvshmemP51.hpp"
-#include "NvshmemP52.hpp"
-#include "NvshmemP6.hpp"
 #include "NvshmemP62.hpp"
 #ifndef HAVE_TPETRA_INST_CUDA
 #error "PERFORMANCE_CGSOLVE_NVSHMEM requires a CUDA-enabled Tpetra instantiation"
@@ -278,230 +272,7 @@ int run() {
 
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-// Minimal P0 adapter: reuse this benchmark's stock CRS construction, but
-// intentionally do not enter CG, SpMV, or Tpetra Import for this smoke test.
-// Keeping it outside run<Node>() avoids instantiating a Kokkos::Cuda-only
-// communication kernel for non-CUDA Tpetra backends.
-int runNvshmemP0(const NvshmemP0::Session& session) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  using Matrix = Tpetra::CrsMatrix<double, LO, GO, Node>;
-  using Vector = Tpetra::Vector<double, LO, GO, Node>;
-
-  auto comm = Tpetra::getDefaultComm();
-  Teuchos::RCP<Matrix> A;
-  if (!filename.empty()) {
-    A = Tpetra::MatrixMarket::Reader<Matrix>::readSparseFile(filename, comm);
-  } else {
-    A = Tpetra::Utils::MatrixGenerator<Matrix>::generate_miniFE_matrix(nsize, comm);
-  }
-
-  Vector X(A->getDomainMap());
-  X.putScalar(static_cast<double>(session.mpiRank() + 1));
-  return NvshmemP0::smokeTest(X, session);
-}
-// P1 uses the same stock CRS construction as P0, but performs the Tpetra
-// doImport oracle and builds/checks the read-only Import metadata plan. It
-// does not enter CG/SpMV or issue any GPU-initiated remote gets.
-int runNvshmemP1(const NvshmemP0::Session& session, bool syntheticTests) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  using Matrix = Tpetra::CrsMatrix<double, LO, GO, Node>;
-  using Map = Tpetra::Map<LO, GO, Node>;
-  using Import = Tpetra::Import<LO, GO, Node>;
-
-  auto comm = Tpetra::getDefaultComm();
-  if (comm->getRank() != session.mpiRank() ||
-      comm->getSize() != session.numPes()) {
-    throw std::runtime_error("P1 requires the same MPI rank order in the Tpetra and NVSHMEM communicators");
-  }
-  Teuchos::RCP<Matrix> A;
-  if (!filename.empty()) {
-    A = Tpetra::MatrixMarket::Reader<Matrix>::readSparseFile(filename, comm);
-  } else {
-    A = Tpetra::Utils::MatrixGenerator<Matrix>::generate_miniFE_matrix(nsize, comm);
-  }
-  if (!A->isFillComplete()) {
-    throw std::runtime_error("P1 requires a fill-complete Tpetra CrsMatrix");
-  }
-  Teuchos::RCP<const Map> domain = A->getDomainMap();
-  Teuchos::RCP<const Map> column = A->getColMap();
-  Teuchos::RCP<const Import> importer = NvshmemP1::ensureImporter(
-      domain, column, A->getGraph()->getImporter(), session.comm());
-
-  // For generated miniFE, inter-rank halo entries should be present with
-  // multiple ranks. For an arbitrary matrix file, zero communication may
-  // legitimately be the entire Import, and is explicitly supported.
-  const bool expectRemote = filename.empty() && session.numPes() > 1;
-  NvshmemP1::runCase("matrix", domain, column, importer, session, expectRemote);
-  if (syntheticTests) {
-    NvshmemP1::runSynthetic<LO, GO, Node>(NvshmemP1::SyntheticKind::Mixed, session);
-    NvshmemP1::runSynthetic<LO, GO, Node>(NvshmemP1::SyntheticKind::OneWay, session);
-    NvshmemP1::runSynthetic<LO, GO, Node>(NvshmemP1::SyntheticKind::LocalOnly, session);
-  }
-  if (session.mpiRank() == 0) {
-    std::cout << "[NVSHMEM P1] PASS (Tpetra Import oracle, verified owner/LID metadata, "
-                 "Kokkos local-only reconstruction; no standalone MPI or NVSHMEM gather)"
-              << std::endl;
-  }
-  return EXIT_SUCCESS;
-}
-// P2 keeps the same stock CrsMatrix and P1 plan, but independently packs,
-// sends, receives and places the full column-map vector using MPI.
-// CUDA-aware MPI is optional; the default GPU path explicitly stages via host.
-int runNvshmemP2(const NvshmemP0::Session& session,
-                 const NvshmemP2::Options& opts) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  using Matrix = Tpetra::CrsMatrix<double, LO, GO, Node>;
-  using Map = Tpetra::Map<LO, GO, Node>;
-  using Import = Tpetra::Import<LO, GO, Node>;
-
-  NvshmemP2::checkOptions(opts);
-  auto comm = Tpetra::getDefaultComm();
-  if (comm->getRank() != session.mpiRank() ||
-      comm->getSize() != session.numPes())
-    throw std::runtime_error("P2 requires matching MPI rank order for Tpetra/NVSHMEM");
-  Teuchos::RCP<Matrix> A;
-  if (!filename.empty()) {
-    A = Tpetra::MatrixMarket::Reader<Matrix>::readSparseFile(filename, comm);
-  } else {
-    A = Tpetra::Utils::MatrixGenerator<Matrix>::generate_miniFE_matrix(nsize, comm);
-  }
-  if (!A->isFillComplete())
-    throw std::runtime_error("P2 requires a fill-complete stock CrsMatrix");
-
-  Teuchos::RCP<const Map> domain = A->getDomainMap();
-  Teuchos::RCP<const Map> column = A->getColMap();
-  Teuchos::RCP<const Import> importer = NvshmemP1::ensureImporter(
-      domain, column, A->getGraph()->getImporter(), session.comm());
-  const bool requireRemote = filename.empty() && session.numPes() > 1;
-  NvshmemP2::runCase("matrix", domain, column, importer, session,
-                     opts, requireRemote, true);
-  if (opts.runSynthetic) {
-    NvshmemP2::runSynthetic<LO, GO, Node>(NvshmemP2::SyntheticKind::Mixed, session, opts);
-    NvshmemP2::runSynthetic<LO, GO, Node>(NvshmemP2::SyntheticKind::OneWay, session, opts);
-    NvshmemP2::runSynthetic<LO, GO, Node>(NvshmemP2::SyntheticKind::LocalOnly, session, opts);
-    NvshmemP2::runSynthetic<LO, GO, Node>(NvshmemP2::SyntheticKind::Interleaved, session, opts);
-  }
-  if (session.mpiRank() == 0)
-    std::cout << "[NVSHMEM P2] PASS (complete host and Kokkos-packed standalone MPI imports; "
-                 "two source epochs; exact Tpetra doImport comparison; no NVSHMEM gather)"
-              << std::endl;
-  return EXIT_SUCCESS;
-}
-// P3: independently gather the full column-map Vector with NVSHMEM scalar
-// device gets. The unmodified P2 Distributor replica remains a second oracle.
-int runNvshmemP3(const NvshmemP0::Session& session,
-                 const NvshmemP3::Options& opts) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  using Matrix = Tpetra::CrsMatrix<double, LO, GO, Node>;
-  using Map = Tpetra::Map<LO, GO, Node>;
-  using Import = Tpetra::Import<LO, GO, Node>;
-
-  NvshmemP3::checkOptions(opts);
-  auto comm = Tpetra::getDefaultComm();
-  if (comm->getRank() != session.mpiRank() ||
-      comm->getSize() != session.numPes())
-    throw std::runtime_error("P3 requires identical MPI rank ordering for Tpetra/NVSHMEM");
-
-  Teuchos::RCP<Matrix> A;
-  if (!filename.empty()) {
-    A = Tpetra::MatrixMarket::Reader<Matrix>::readSparseFile(filename, comm);
-  } else {
-    A = Tpetra::Utils::MatrixGenerator<Matrix>::generate_miniFE_matrix(nsize, comm);
-  }
-  if (!A->isFillComplete())
-    throw std::runtime_error("P3 requires a fill-complete stock CrsMatrix");
-  Teuchos::RCP<const Map> domain = A->getDomainMap();
-  Teuchos::RCP<const Map> column = A->getColMap();
-  Teuchos::RCP<const Import> importer = NvshmemP1::ensureImporter(
-      domain, column, A->getGraph()->getImporter(), session.comm());
-
-  const bool needRemote = filename.empty() && session.numPes() > 1;
-  NvshmemP3::runCase("matrix", domain, column, importer, session,
-                     opts, needRemote, true);
-  if (opts.runSynthetic) {
-    NvshmemP3::runSynthetic<LO, GO, Node>(
-        NvshmemP3::SyntheticKind::Mixed, session, opts);
-    NvshmemP3::runSynthetic<LO, GO, Node>(
-        NvshmemP3::SyntheticKind::OneWay, session, opts);
-    NvshmemP3::runSynthetic<LO, GO, Node>(
-        NvshmemP3::SyntheticKind::LocalOnly, session, opts);
-    NvshmemP3::runSynthetic<LO, GO, Node>(
-        NvshmemP3::SyntheticKind::Interleaved, session, opts);
-  }
-  if (session.mpiRank() == 0)
-    std::cout << "[NVSHMEM P3] PASS (full-column CUDA NVSHMEM scalar gets; "
-                 "Tpetra and P2 exact comparisons; no NVSHMEM allocation passed to MPI)"
-              << std::endl;
-  return EXIT_SUCCESS;
-}
-// P4 is a separate correctness/robustness suite; no timing or speedup checks.
-int runNvshmemP4(const NvshmemP0::Session& session,
-                 const NvshmemP4::Options& opts) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  const auto comm = Tpetra::getDefaultComm();
-  if (comm->getRank() != session.mpiRank() || comm->getSize() != session.numPes())
-    throw std::runtime_error("P4 requires matching Tpetra MPI and NVSHMEM PE groups");
-  NvshmemP4::run<LO, GO, Node>(session, opts, nsize, filename);
-  return EXIT_SUCCESS;
-}
-// P5.0: read-only map/plan analysis; no NVSHMEM gets, MPI vector payload,
-// or timed kernels. P0-P4 remain selectable and unchanged.
-int runNvshmemP50(const NvshmemP0::Session& session,
-                  const NvshmemP50::Options& opts) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  NvshmemP50::run<LO, GO, Node>(session, opts, nsize, filename);
-  return EXIT_SUCCESS;
-}
-// P5.1: metadata-only sender-packed PUT plan; payload begins in P5.2.
-int runNvshmemP51(const NvshmemP0::Session& session,
-                  const NvshmemP51::Options& opts) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  NvshmemP51::run<LO, GO, Node>(session, opts, nsize, filename);
-  return EXIT_SUCCESS;
-}
-// P5.2: GPU packed PUT+signal, per-peer on-stream waits, per-peer GPU ACK.
-int runNvshmemP52(const NvshmemP0::Session& session,
-                  const NvshmemP52::Options& opts) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  NvshmemP52::run<LO, GO, Node>(session, opts, nsize, filename);
-  return EXIT_SUCCESS;
-}
-// P6: allocation-excluded Tpetra vs packed-PUT end-to-end and stage timings.
-int runNvshmemP6(const NvshmemP0::Session& session,
-                 const NvshmemP6::Options& opts) {
-  using namespace CGParams;
-  using Node = Tpetra::KokkosCompat::KokkosCudaWrapperNode;
-  using LO = Tpetra::Map<>::local_ordinal_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
-  NvshmemP6::run<LO, GO, Node>(session, opts, nsize, filename);
-  return EXIT_SUCCESS;
-}
-// P6.2: two concurrent CUDA kernels with sender/receiver descriptor chunks;
-// caller-side MPI_Barrier at the beginning of every generation (no ACK).
+// The archived P0-P6.1 entry points are no longer linked into this program.
 int runNvshmemP62(const NvshmemP0::Session& session,
                   const NvshmemP62::Options& opts) {
   using namespace CGParams;
@@ -542,23 +313,6 @@ int main(int argc, char* argv[]) {
   bool useSerial  = false;
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  bool nvshmemP0 = false;
-  bool nvshmemP1 = false;
-  bool nvshmemP1Synthetic = true;
-  bool nvshmemP2 = false;
-  NvshmemP2::Options nvshmemP2Options;
-  bool nvshmemP3 = false;
-  NvshmemP3::Options nvshmemP3Options;
-  bool nvshmemP4 = false;
-  NvshmemP4::Options nvshmemP4Options;
-  bool nvshmemP50 = false;
-  NvshmemP50::Options nvshmemP50Options;
-  bool nvshmemP51 = false;
-  NvshmemP51::Options nvshmemP51Options;
-  bool nvshmemP52 = false;
-  NvshmemP52::Options nvshmemP52Options;
-  bool nvshmemP6 = false;
-  NvshmemP6::Options nvshmemP6Options;
   bool nvshmemP62 = false;
   NvshmemP62::Options nvshmemP62Options;
 #endif
@@ -578,149 +332,6 @@ int main(int argc, char* argv[]) {
   cmdp.setOption("tol_small", &tol_small, "Tolerance for total CG-Time and final residual.");
   cmdp.setOption("tol_large", &tol_large, "Tolerance for individual times.");
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  cmdp.setOption("nvshmem-p0", "no-nvshmem-p0", &nvshmemP0,
-                 "Use Kokkos::Cuda to clone into NVSHMEM and issue GPU remote gets.");
-  cmdp.setOption("nvshmem-p1", "no-nvshmem-p1", &nvshmemP1,
-                 "Validate the Tpetra Import oracle and rank/LID plan (no remote gets).");
-  cmdp.setOption("nvshmem-p1-synthetic", "no-nvshmem-p1-synthetic", &nvshmemP1Synthetic,
-                 "Also run tiny noncontiguous/permuted, one-way, and local-only Map cases.");
-  cmdp.setOption("nvshmem-p2", "no-nvshmem-p2", &nvshmemP2,
-                 "Standalone host/CUDA pack and MPI Import against Tpetra doImport.");
-  cmdp.setOption("nvshmem-p2-synthetic", "no-nvshmem-p2-synthetic",
-                 &nvshmemP2Options.runSynthetic,
-                 "Exercise mixed, one-way, local-only and interleaved synthetic Maps.");
-  cmdp.setOption("nvshmem-p2-gpu-aware-mpi", "no-nvshmem-p2-gpu-aware-mpi",
-                 &nvshmemP2Options.gpuAwareMpi,
-                 "ALSO test direct MPI with CUDA pointers (requires known CUDA-aware MPI).");
-  cmdp.setOption("nvshmem-p2-dump-exports", "no-nvshmem-p2-dump-exports",
-                 &nvshmemP2Options.dumpExports,
-                 "Print the complete ordered sequence (exportPID,exportLID) on every rank.");
-  cmdp.setOption("nvshmem-p2-warmup", &nvshmemP2Options.warmup,
-                 "Warmup repetitions for the matrix P2 timing paths (default 2).");
-  cmdp.setOption("nvshmem-p2-repetitions", &nvshmemP2Options.repetitions,
-                 "Measured repetitions for the matrix P2 timing paths (default 10).");
-#endif
-
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  cmdp.setOption("nvshmem-p3", "no-nvshmem-p3", &nvshmemP3,
-                 "GPU-initiated NVSHMEM scalar-gather Import; compare to Tpetra and P2.");
-  cmdp.setOption("nvshmem-p3-synthetic", "no-nvshmem-p3-synthetic",
-                 &nvshmemP3Options.runSynthetic,
-                 "Also validate all four P3 synthetic Map cases.");
-  cmdp.setOption("nvshmem-p3-baselines", "no-nvshmem-p3-baselines",
-                 &nvshmemP3Options.benchmarkBaselines,
-                 "Time stock Tpetra and P2 Distributor again in the P3 matrix run.");
-  cmdp.setOption("nvshmem-p3-peer-stats", "no-nvshmem-p3-peer-stats",
-                 &nvshmemP3Options.dumpPeerStats,
-                 "Dump the actual rank-to-rank P1 remote counts, bytes, hostnames and nonadjacent GIDs.");
-  cmdp.setOption("nvshmem-p3-warmup", &nvshmemP3Options.warmup,
-                 "Warmup repetitions for the prepared-symmetric P3 gather.");
-  cmdp.setOption("nvshmem-p3-repetitions", &nvshmemP3Options.repetitions,
-                 "Measured repetitions for the prepared-symmetric P3 gather.");
-#endif
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  cmdp.setOption("nvshmem-p4", "no-nvshmem-p4", &nvshmemP4,
-                 "Correctness-only NVSHMEM Import robustness test matrix (no timing).");
-  cmdp.setOption("nvshmem-p4-case", &nvshmemP4Options.only,
-                 "all|matrix|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
-  cmdp.setOption("nvshmem-p4-epochs", &nvshmemP4Options.epochs,
-                 "Distinct source updates per symmetric allocation (minimum 2).");
-  cmdp.setOption("nvshmem-p4-cycles", &nvshmemP4Options.cycles,
-                 "Collective symmetric allocation/free cycles (minimum 2).");
-  cmdp.setOption("nvshmem-p4-min-nodes", &nvshmemP4Options.minimumNodes,
-                 "Fail if fewer physical nodes participated (default 1).");
-  cmdp.setOption("nvshmem-p4-max-nodes", &nvshmemP4Options.maximumNodes,
-                 "Fail if more physical nodes participated (0 means unlimited).");
-  cmdp.setOption("nvshmem-p4-cross-node", "no-nvshmem-p4-cross-node",
-                 &nvshmemP4Options.requireCrossNode,
-                 "Require at least one actual inter-node remote scalar get.");
-  cmdp.setOption("nvshmem-p4-negative", "no-nvshmem-p4-negative",
-                 &nvshmemP4Options.negativeChecks,
-                 "Check that invalid P3 local and remote descriptors are rejected safely.");
-#endif
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  cmdp.setOption("nvshmem-p50", "no-nvshmem-p50", &nvshmemP50,
-                 "P5.0 only: inspect Import contiguity, peer groups and potential bulk transfers.");
-  cmdp.setOption("nvshmem-p50-case", &nvshmemP50Options.only,
-                 "all|matrix|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
-  cmdp.setOption("nvshmem-p50-peers", "no-nvshmem-p50-peers", &nvshmemP50Options.showPeers,
-                 "Print ordered per-source-PE statistics.");
-  cmdp.setOption("nvshmem-p50-outgoing", "no-nvshmem-p50-outgoing",
-                 &nvshmemP50Options.showOutgoing,
-                 "Print per-destination-rank export/fanout statistics.");
-  cmdp.setOption("nvshmem-p50-csv-prefix", &nvshmemP50Options.csvPrefix,
-                 "Optional output prefix for rank/recv/send/global CSV files on MPI rank zero.");
-#endif
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  cmdp.setOption("nvshmem-p51", "no-nvshmem-p51", &nvshmemP51,
-                 "P5.1 only: build/verify packed-PUT sender, inbox, signal and unpack plans.");
-  cmdp.setOption("nvshmem-p51-case", &nvshmemP51Options.only,
-                 "all|matrix|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
-  cmdp.setOption("nvshmem-p51-peers", "no-nvshmem-p51-peers", &nvshmemP51Options.showPeers,
-                 "Print every peer's packed send / disjoint inbox layout.");
-  cmdp.setOption("nvshmem-p51-min-nodes", &nvshmemP51Options.minimumNodes,
-                 "Require at least this many distinct physical nodes (default 1).");
-  cmdp.setOption("nvshmem-p51-max-nodes", &nvshmemP51Options.maximumNodes,
-                 "Require no more than this many physical nodes (0 means unlimited).");
-  cmdp.setOption("nvshmem-p51-cross-node", "no-nvshmem-p51-cross-node",
-                 &nvshmemP51Options.requireCrossNode,
-                 "Require at least one packet planned across distinct physical nodes.");
-#endif
-#ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  cmdp.setOption("nvshmem-p52", "no-nvshmem-p52", &nvshmemP52,
-                 "P5.2 GPU PUT+signal with point-to-point generation/credit ACK; Tpetra/P2 oracles.");
-  cmdp.setOption("nvshmem-p52-case", &nvshmemP52Options.only,
-                 "all|matrix|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
-  cmdp.setOption("nvshmem-p52-epochs", &nvshmemP52Options.epochs,
-                 "Distinct changed X values per symmetric allocation (minimum 4).");
-  cmdp.setOption("nvshmem-p52-cycles", &nvshmemP52Options.cycles,
-                 "Symmetric allocation/free cycles (minimum 2).");
-  cmdp.setOption("nvshmem-p52-peers", "no-nvshmem-p52-peers",
-                 &nvshmemP52Options.showPeers,
-                 "Print sender/receiver, ready slot and consumption-credit slot per peer.");
-  cmdp.setOption("nvshmem-p52-min-nodes", &nvshmemP52Options.minimumNodes,
-                 "Require at least this many physical nodes.");
-  cmdp.setOption("nvshmem-p52-max-nodes", &nvshmemP52Options.maximumNodes,
-                 "Maximum physical nodes (0 unlimited).");
-  cmdp.setOption("nvshmem-p52-cross-node", "no-nvshmem-p52-cross-node",
-                 &nvshmemP52Options.requireCrossNode,
-                 "Require at least one actual GPU PUT across physical nodes.");
-  cmdp.setOption("nvshmem-p52-skew-ms", &nvshmemP52Options.skewMillis,
-                 "Delay rank 0 before its first PUT Import, testing signals arriving without a resident receive kernel.");
-  cmdp.setOption("nvshmem-p52-stress-only", "no-nvshmem-p52-stress-only",
-                 &nvshmemP52Options.stressOnly,
-                 "P5.2.1: repeated NVSHMEM Imports with NO MPI/Tpetra/P2 reference calls between epochs.");
-  cmdp.setOption("nvshmem-p52-stress-entry-ms", &nvshmemP52Options.stressEntryDelayMs,
-                 "Deterministic independent per-rank entry delays (0..1000 ms).");
-  cmdp.setOption("nvshmem-p52-stress-ack-ms", &nvshmemP52Options.stressAckDelayMs,
-                 "Deterministic receiver delay AFTER inbox unpack but BEFORE peer ACK (0..1000 ms).");
-  cmdp.setOption("nvshmem-p52-stress-verify-every", &nvshmemP52Options.stressVerifyEvery,
-                 "Full host owner/LID value verification stride (default every Import).");
-  cmdp.setOption("nvshmem-p52-stress-seed", &nvshmemP52Options.stressSeed,
-                 "Deterministic per-PE independent skew/ACK delay seed.");
-  cmdp.setOption("nvshmem-p6", "no-nvshmem-p6", &nvshmemP6,
-                 "P6 benchmark: identical Tpetra doImport vs allocation-prepared packed PUT, plus NVSHMEM phases.");
-  cmdp.setOption("nvshmem-p6-case", &nvshmemP6Options.only,
-                 "matrix (default)|all|identity|permute|sparse-mixed|one-way|uneven|zero-owner|all-empty|multi-owner|fanout");
-  cmdp.setOption("nvshmem-p6-mode", &nvshmemP6Options.mode,
-                 "both (default)|direct|phases. Direct uses fence/barrier timing; phases use no intra-loop MPI.");
-  cmdp.setOption("nvshmem-p6-put-variant", &nvshmemP6Options.putVariant,
-                 "P6.1 GPU PUT issuance: thread (P6 baseline)|warp (32 lanes per peer)|block (128 threads per peer).");
-  cmdp.setOption("nvshmem-p6-warmup", &nvshmemP6Options.warmup,
-                 "Untimed Tpetra + NVSHMEM warmup repetitions per Map (default 8).");
-  cmdp.setOption("nvshmem-p6-reps", &nvshmemP6Options.repetitions,
-                 "Direct fence/barrier/fence measured repetitions of each method (default 100).");
-  cmdp.setOption("nvshmem-p6-phase-reps", &nvshmemP6Options.phaseRepetitions,
-                 "NVSHMEM-only no-MPI stage-timed repetitions (default 100).");
-  cmdp.setOption("nvshmem-p6-out", &nvshmemP6Options.outputPrefix,
-                 "Optional output prefix for rank0 CSV with every rank's raw timing samples.");
-  cmdp.setOption("nvshmem-p6-min-nodes", &nvshmemP6Options.minimumNodes,
-                 "Required minimum physical node count (default 1).");
-  cmdp.setOption("nvshmem-p6-max-nodes", &nvshmemP6Options.maximumNodes,
-                 "Required maximum physical node count (0 unlimited).");
-  cmdp.setOption("nvshmem-p6-cross-node", "no-nvshmem-p6-cross-node",
-                 &nvshmemP6Options.requireCrossNode,
-                 "Require a genuine cross-node packet relationship in selected cases.");
   cmdp.setOption("nvshmem-p62", "no-nvshmem-p62", &nvshmemP62,
                  "P6.2 descriptor-driven two-kernel packed PUT with MPI start barrier, no ACK.");
   cmdp.setOption("nvshmem-p62-case", &nvshmemP62Options.only,
@@ -816,22 +427,11 @@ int main(int argc, char* argv[]) {
   }
 
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  if (static_cast<int>(nvshmemP0) + static_cast<int>(nvshmemP1) +
-          static_cast<int>(nvshmemP2) + static_cast<int>(nvshmemP3) +
-          static_cast<int>(nvshmemP4) + static_cast<int>(nvshmemP50) +
-          static_cast<int>(nvshmemP51) + static_cast<int>(nvshmemP52) +
-          static_cast<int>(nvshmemP6) + static_cast<int>(nvshmemP62) > 1) {
+  if (nvshmemP62 && (!useCuda || useSYCL || useHIP || useOpenMP ||
+                     useThreads || useSerial)) {
     if (myRank == 0)
-      std::cerr << "Choose at most one of --nvshmem-p0, --nvshmem-p1, --nvshmem-p2, --nvshmem-p3, --nvshmem-p4, --nvshmem-p50, --nvshmem-p51, --nvshmem-p52, --nvshmem-p6 or --nvshmem-p62.\n";
-    return EXIT_FAILURE;
-  }
-  if ((nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52 || nvshmemP6 || nvshmemP62) &&
-      (!useCuda || useSYCL || useHIP || useOpenMP ||
-       useThreads || useSerial)) {
-    if (myRank == 0) {
-      std::cerr << "--nvshmem-p0/--nvshmem-p1/--nvshmem-p2/--nvshmem-p3/--nvshmem-p4/--nvshmem-p50/--nvshmem-p51/--nvshmem-p52/--nvshmem-p6/--nvshmem-p62 require the CUDA Tpetra backend "
-                   "(use --cuda and --numgpus=<GPUs visible per node>).\n";
-    }
+      std::cerr << "--nvshmem-p62 requires the CUDA Tpetra backend "
+                   "(use --cuda and --numgpus=<GPUs visible per rank>).\n";
     return EXIT_FAILURE;
   }
 #endif
@@ -846,7 +446,7 @@ int main(int argc, char* argv[]) {
   kokkosArgs.set_disable_warnings(!verbose);
   int deviceRank = myRank;
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-  if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52 || nvshmemP6 || nvshmemP62) {
+  if (nvshmemP62) {
     // Kokkos owns CUDA device initialization. Use local MPI rank to choose
     // a GPU when each node exposes multiple GPUs to its local ranks.
     deviceRank = NvshmemP0::nodeLocalMpiRank(MPI_COMM_WORLD);
@@ -858,20 +458,11 @@ int main(int argc, char* argv[]) {
   int status = EXIT_FAILURE;
   try {
 #ifdef PERFORMANCE_CGSOLVE_NVSHMEM
-    if (nvshmemP0 || nvshmemP1 || nvshmemP2 || nvshmemP3 || nvshmemP4 || nvshmemP50 || nvshmemP51 || nvshmemP52 || nvshmemP6 || nvshmemP62) {
-      // Destroy NVSHMEM session before Kokkos::finalize and MPI_Finalize.
+    if (nvshmemP62) {
+      // Retire NVSHMEM before Kokkos::finalize and MPI_Finalize.
       NvshmemP0::Session session(MPI_COMM_WORLD);
       session.describe(deviceRank % numgpus);
-      if (nvshmemP0) status = runNvshmemP0(session);
-      else if (nvshmemP1) status = runNvshmemP1(session, nvshmemP1Synthetic);
-      else if (nvshmemP2) status = runNvshmemP2(session, nvshmemP2Options);
-      else if (nvshmemP3) status = runNvshmemP3(session, nvshmemP3Options);
-      else if (nvshmemP4) status = runNvshmemP4(session, nvshmemP4Options);
-      else if (nvshmemP50) status = runNvshmemP50(session, nvshmemP50Options);
-      else if (nvshmemP51) status = runNvshmemP51(session, nvshmemP51Options);
-      else if (nvshmemP52) status = runNvshmemP52(session, nvshmemP52Options);
-      else if (nvshmemP6) status = runNvshmemP6(session, nvshmemP6Options);
-      else status = runNvshmemP62(session, nvshmemP62Options);
+      status = runNvshmemP62(session, nvshmemP62Options);
     } else
 #endif
     {
