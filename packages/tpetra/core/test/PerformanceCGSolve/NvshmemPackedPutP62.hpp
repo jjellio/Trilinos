@@ -259,7 +259,6 @@ class Exchange {
           "P7.1 receive samples", std::max<std::size_t>(1, receiveSampling_.samples));
       localProbeDevice_ = Kokkos::View<NvshmemP71Stats::Probe*, Kokkos::CudaSpace>(
           "P7.1 local copy samples", std::max<std::size_t>(1, localSampling_.samples));
-      cudaDeviceProp prop{};
       clockKHz_ = 0;
       cudaCheck(cudaDeviceGetAttribute(&clockKHz_, cudaDevAttrClockRate, device), "P7.1 device clock properties");
       require(clockKHz_ > 0, "P7.1 cannot determine GPU SM clock rate");

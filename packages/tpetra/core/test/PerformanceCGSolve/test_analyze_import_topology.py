@@ -43,13 +43,18 @@ with tempfile.TemporaryDirectory(prefix='p71b-analyzer-test-') as d:
     log.write_text('[NVSHMEM TOPOLOGY] nranks=2 nodes=2 ppn=1 offDegree=1 intraDegree=0 '
                    'source=contiguous ownedPerRank=1024 remoteDoublesPerRank=128 '
                    'crossNodeDoublesPerRank=128 localValues=0 status=PLAN_PASS\n'
-                   '[NVSHMEM P6.2] SUMMARY status=PASS\n'
+                   '[NVSHMEM TOPOLOGY IMPORTER] status=PASS matchedRanks=2 matrixConstructed=NO independentImporter=YES\n'
+                   '[NVSHMEM P6.2 CASE] case=topology status=PASS verifiedOutputs=4\n'
                    '[NVSHMEM TOPOLOGY] SUMMARY status=PASS\n')
     entry=dict(run_id='0001',pass_id='1',topology='inter2',volume='per-peer',degree='1',
                intra_degree='0',payload_bytes='1024',source='contiguous',target='remote-only',
                variant='warp',chunk='512',transport='ibrc',mode='direct',status='0',
                log=str(log),output_prefix=str(prefix))
     entry['pass'] = entry.pop('pass_id')
+    # Reproduce manifests whose absolute cluster paths no longer exist after
+    # the results are extracted on a different computer.
+    entry['log'] = '/no-longer-existing-cluster/archive/demo.log'
+    entry['output_prefix'] = '/no-longer-existing-cluster/archive/demo'
     write(root/'manifest.tsv', list(entry),[entry],sep='\t')
     (root/'config.txt').write_text('np=2\nppn=1\n')
     def call():
@@ -63,6 +68,20 @@ with tempfile.TemporaryDirectory(prefix='p71b-analyzer-test-') as d:
     assert float(data[0]['p62_import_us'])==71
     assert float(data[0]['p62_including_barrier_us'])==92
     assert int(data[0]['cross_node_doubles_global'])==256
+    # The repaired analyzer must refuse a missing REAL P6.2 CASE PASS,
+    # rather than accepting an unrelated standalone P6.2 summary marker.
+    original_log = log.read_text()
+    log.write_text(original_log.replace(
+        '[NVSHMEM P6.2 CASE] case=topology status=PASS',
+        '[NVSHMEM P6.2] SUMMARY status=PASS'))
+    rejected = call()
+    assert rejected.returncode != 0, (rejected.stdout, rejected.stderr)
+    assert 'P6.2 CASE' in rejected.stderr, rejected.stderr
+    assert (root/'analysis_errors.txt').exists()
+    log.write_text(original_log)
+    accepted_again = call()
+    assert accepted_again.returncode == 0, (accepted_again.stdout, accepted_again.stderr)
+    assert not (root/'analysis_errors.txt').exists(), 'stale error report not cleared'
     traffic[1]['doubles']=127
     write(traffic_path,list(traffic[0]),traffic)
     b=call()

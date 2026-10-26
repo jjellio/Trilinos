@@ -266,7 +266,12 @@ for ((pass=1; pass<=PASSES; pass++)); do
                     "${cmd[@]}"
                   fi
                 ) > "$log" 2>&1; then
-                  if ! grep -q '\[NVSHMEM TOPOLOGY\] SUMMARY status=PASS' "$log"; then
+                  # Both the independent Importer check and P6.2 benchmarkCase
+                  # must pass. The matrix-free executable never prints the
+                  # standalone NvshmemP62::run '[NVSHMEM P6.2] SUMMARY' marker.
+                  if ! grep -qF '[NVSHMEM TOPOLOGY IMPORTER] status=PASS' "$log" ||
+                     ! grep -qF '[NVSHMEM P6.2 CASE] case=topology status=PASS' "$log" ||
+                     ! grep -qF '[NVSHMEM TOPOLOGY] SUMMARY status=PASS' "$log"; then
                     status=98
                   fi
                 else

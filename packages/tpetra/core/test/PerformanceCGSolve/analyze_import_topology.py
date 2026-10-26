@@ -30,6 +30,39 @@ def save_table(path, fields, rows):
         writer.writerows(rows)
 
 
+def resolve_run_file(folder, recorded_path):
+    """Prefer files from the analyzed results directory over stale site paths.
+
+    Sweep manifests contain absolute paths from the originating cluster. A
+    tarball extraction preserves only their basenames. This keeps old manifests
+    usable without rewriting them and also supports in-place cluster runs.
+    """
+    recorded = Path(recorded_path)
+    local = folder / recorded.name
+    if local.is_file():
+        return local
+    if recorded.is_file():
+        return recorded
+    raise ValueError(f'missing run artifact: {recorded.name}')
+
+
+def check_pass_markers(text):
+    """Validate *all* completion stages produced by the matrix-free driver.
+
+    NvshmemP62::benchmarkCase emits P6.2 CASE, not the standalone P6.2
+    top-level SUMMARY (only NvshmemP62::run prints that marker).
+    """
+    required = (
+        '[NVSHMEM TOPOLOGY IMPORTER] status=PASS',
+        '[NVSHMEM P6.2 CASE] case=topology status=PASS',
+        '[NVSHMEM TOPOLOGY] SUMMARY status=PASS',
+    )
+    absent = [marker for marker in required if marker not in text]
+    if absent:
+        raise ValueError('missing Importer, P6.2 case or topology correctness PASS marker: '
+                         + ', '.join(absent))
+
+
 def direct_sample_tables(path, n_ranks):
     groups = defaultdict(dict)
     for row in load_table(path):
@@ -112,14 +145,12 @@ def check_traffic(path, n_ranks, expected_degree, expected_cross, expected_ppn):
 def parse_run(row, folder, n_ranks, ppn):
     if row['status'] != '0':
         raise ValueError(f'nonzero MPI exit code/status={row["status"]}')
-    prefix = row['output_prefix']
-    log = Path(row['log'])
-    if not log.exists():
-        raise ValueError('missing MPI log')
+    prefix = Path(row['output_prefix'])
+    log = resolve_run_file(folder, row['log'])
+    if log.name != prefix.name + '.log':
+        raise ValueError('manifest log name disagrees with output prefix')
     text = log.read_text(errors='replace')
-    if '[NVSHMEM TOPOLOGY] SUMMARY status=PASS' not in text or \
-       '[NVSHMEM P6.2] SUMMARY status=PASS' not in text:
-        raise ValueError('missing Importer or P6.2 correctness PASS marker')
+    check_pass_markers(text)
     match = re.search(r'\[NVSHMEM TOPOLOGY\] nranks=(\d+) nodes=(\d+) ppn=(\d+)\s+' \
                       r'offDegree=(\d+) intraDegree=(\d+)\s+[^\n]*?' \
                       r'crossNodeDoublesPerRank=(\d+)', text)
@@ -130,10 +161,12 @@ def parse_run(row, folder, n_ranks, ppn):
        intra != int(row['intra_degree']):
         raise ValueError('rank count, PPN or degree metadata mismatch')
     remote, total_cross, nodes_csv = check_traffic(
-        Path(prefix+'_traffic.csv'), n_ranks, off+intra, cross, ppn)
+        resolve_run_file(folder, str(prefix)+'_traffic.csv'),
+        n_ranks, off+intra, cross, ppn)
     if nodes_csv != nodes:
         raise ValueError('node count mismatch')
-    tables = direct_sample_tables(Path(prefix+'_topology_p62_samples.csv'), n_ranks)
+    tables = direct_sample_tables(
+        resolve_run_file(folder, str(prefix)+'_topology_p62_samples.csv'), n_ranks)
     mpi = rankmax_medians(tables, ('DIRECT','tpetra_doImport'))
     p62 = rankmax_medians(tables, ('DIRECT','descriptor_two_stream'))
     full = paired_barrier_plus_import(tables, n_ranks)
@@ -195,9 +228,12 @@ def main():
         summary.append(item)
     save_table(folder/'summary.csv',grouping+['independent_mpi_launches']+
                [m+'_median' for m in stats],summary)
+    error_report = folder/'analysis_errors.txt'
     if errors:
-        (folder/'analysis_errors.txt').write_text('\n'.join(errors)+'\n')
+        error_report.write_text('\n'.join(errors)+'\n')
         for error in errors: print('ERROR',error,file=sys.stderr)
+    elif error_report.exists():
+        error_report.unlink()  # clear obsolete reports from a previous parse
     print(f'[P7.1b ANALYSIS] total_launches={len(runs)} PASS={len(parsed)} failed={len(errors)}')
     print('The unit of independent replication is an MPI launch, NOT a timed epoch.')
     for item in summary:
